@@ -156,6 +156,11 @@ test("clean clamps levels and drops unknown actions", () => {
   );
 });
 
+test("clean moves an open link from text to url", () => {
+  const out = clean({ say: "", steps: [step({ do: "open", text: "spotify:search:Drake" }), step({ do: "open", text: "the app" })] } as any);
+  assert.deepEqual(out.steps.map((s) => s.url), ["spotify:search:Drake", ""]);
+});
+
 test("health check and unknown routes", async () => {
   assert.equal((await worker.fetch(new Request("https://alfred.example/"), env)).status, 200);
   assert.equal((await worker.fetch(new Request("https://alfred.example/x"), env)).status, 404);

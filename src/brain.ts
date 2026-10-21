@@ -81,7 +81,7 @@ Steps (every field is required; use 0 or "" for fields an action does not use):
 - message: who is the contact name as spoken ("Mom", "Omar"); text is the message, written as the owner would \
 send it (first person, fix dictation errors, no quotes).
 - call: who is the contact name.
-- open: url opens an app or page. Use app URL schemes: spotify:, music:, youtube:, whatsapp:, instagram:, \
+- open: url opens an app or page (put the link in url, not text). Use app URL schemes: spotify:, music:, youtube:, whatsapp:, instagram:, \
 twitter:, snapchat:, tiktok:, mailto:, sms:, photos-redirect:, calshow:, mobilenotes:, x-apple-reminderkit:, \
 shortcuts:, clock-alarm:, App-prefs: (Settings). Directions: maps://?daddr=<place, url-encoded>. \
 Play something on Spotify: spotify:search:<query, url-encoded>. Search the web: https://www.google.com/search?q=<query>.
@@ -157,12 +157,15 @@ export function clean(raw: Reply): Reply {
       let value = Number.isFinite(s.value) ? s.value : 0;
       if (s.do === "volume" || s.do === "brightness") value = Math.min(100, Math.max(0, Math.round(value)));
       if (s.do === "timer") value = Math.max(0, Math.round(value));
+      let url = s.url ?? "";
+      // Smaller models sometimes put the link in text; the Shortcut only opens url.
+      if (s.do === "open" && !url && /^[a-z][a-z0-9+.-]*:/i.test(s.text ?? "")) url = s.text;
       return {
         do: s.do,
         value,
         text: s.text ?? "",
         who: s.who ?? "",
-        url: s.url ?? "",
+        url,
         when: s.when ?? "",
       };
     });
