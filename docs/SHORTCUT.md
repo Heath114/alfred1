@@ -12,7 +12,7 @@ editor; type the name in **bold**.
 Shortcuts app → **+** → name it **Alfred**.
 
 1. **Dictate Text**. Tap the arrow: Language your language, Stop Listening **After Pause**.
-2. **Current Date**.
+2. **Date** (it shows as "Current Date"; older iOS calls the action **Current Date**).
 3. **Format Date**: Date Format **ISO 8601**, Include ISO 8601 Time **on**.
 4. **Get Contents of URL**: URL `https://alfred.<your-subdomain>.workers.dev/command`
    - Method **POST**
