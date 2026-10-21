@@ -3,5 +3,10 @@ main = "src/worker.ts"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Secrets (not in this file): npx wrangler secret put ANTHROPIC_API_KEY / ALFRED_KEY
-# Optional: [vars] MODEL = "claude-haiku-5-5" for faster, cheaper replies.
+# Workers AI does the thinking by default (free daily allowance, no extra key).
+[ai]
+binding = "AI"
+
+# Secrets (not in this file): npx wrangler secret put ALFRED_KEY
+# Optional: npx wrangler secret put ANTHROPIC_API_KEY to use Claude instead of Workers AI.
+# Optional: [vars] MODEL = "<model id>" to pick a different Workers AI or Claude model.

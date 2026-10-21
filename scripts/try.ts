@@ -1,13 +1,13 @@
-// Try commands against the real API without the phone:
+// Try commands against Claude without the phone (for Workers AI, use `wrangler dev --remote`):
 //   ANTHROPIC_API_KEY=... npm run try -- "skip this song" "text mom I'm running late"
 import Anthropic from "@anthropic-ai/sdk";
-import { interpret } from "../src/brain.ts";
+import { claude, interpret } from "../src/brain.ts";
 
-const client = new Anthropic();
+const think = claude(new Anthropic(), process.env.MODEL);
 const now = new Date().toISOString();
 for (const text of process.argv.slice(2)) {
   const started = Date.now();
-  const reply = await interpret(client, { text, now }, process.env.MODEL);
+  const reply = await interpret(think, { text, now });
   console.log(`\n> ${text}  (${Date.now() - started} ms)`);
   console.log(JSON.stringify(reply, null, 2));
 }

@@ -10,7 +10,7 @@ directions, and quick questions.
 "Hey Alfred"  ──►  Shortcut "Alfred" listens  ──►  POST /command {"text": "skip this song"}
  (Vocal Shortcut)                                            │
                                                              ▼
-                                                 Worker (this repo) asks Claude,
+                                                 Worker (this repo) asks an AI model,
                                                  returns {"say": "", "steps": [{"do": "next", ...}]}
                                                              │
                      Shortcut runs each step  ◄──────────────┘
@@ -22,7 +22,7 @@ iOS doesn't let any app listen for its own wake word or control other apps, but 
 Shortcuts' media actions control whatever app is playing. This repo is the brain in the middle:
 a Cloudflare Worker that turns what you said into steps the Shortcut can run.
 
-- `src/brain.ts`: the prompt, the list of actions, and the Claude call (structured output, so the
+- `src/brain.ts`: the prompt, the list of actions, and the model call (JSON schema output, so the
   reply always has the shape the Shortcut expects).
 - `src/worker.ts`: the HTTP endpoint, protected by a shared key.
 - `docs/SHORTCUT.md`: building the Shortcut on the phone.
@@ -34,12 +34,12 @@ The actions are fixed by what the Shortcut has blocks for: `next`, `previous`, `
 
 ## Deploy (about 5 minutes)
 
-Needs Node 22+, a free Cloudflare account and an Anthropic API key (console.anthropic.com).
+Needs Node 22+ and a free Cloudflare account. Nothing else: the thinking runs on Cloudflare
+Workers AI.
 
 ```sh
 npm install
 npx wrangler login
-npx wrangler secret put ANTHROPIC_API_KEY     # paste the API key
 npx wrangler secret put ALFRED_KEY            # paste a long random password; the Shortcut sends it
 npx wrangler deploy                           # prints https://alfred.<you>.workers.dev
 ```
@@ -56,17 +56,21 @@ Then build the Shortcut: [`docs/SHORTCUT.md`](docs/SHORTCUT.md).
 
 ## Model
 
-`claude-opus-5-5` at low effort. For quicker, cheaper replies set `MODEL = "claude-haiku-5-5"`
-under `[vars]` in `wrangler.toml` and deploy again. Requests use server-side refusal fallbacks
-(`fallbacks: "default"`), so a request a model declines is retried on another one automatically.
+By default, Cloudflare Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`), inside Cloudflare's
+free daily allowance at this volume. Pick another Workers AI model with `MODEL` under `[vars]` in
+`wrangler.toml`.
+
+Optional upgrade: `npx wrangler secret put ANTHROPIC_API_KEY` switches the thinking to Claude
+(`claude-opus-5-5` at low effort, or set `MODEL`), which handles messy dictation and multi-step
+commands better. Claude requests use server-side refusal fallbacks (`fallbacks: "default"`).
 
 ## Developing
 
 ```sh
-npm test                 # Worker + brain, with the Claude API stubbed
+npm test                 # Worker + brain, with Workers AI and the Claude API stubbed
 npm run typecheck
-ANTHROPIC_API_KEY=... npm run try -- "skip this song" "text mom I'm 10 minutes late"   # real API, prints timing
-npx wrangler dev         # local Worker; put the two secrets in .dev.vars
+npx wrangler dev --remote   # local Worker using real Workers AI; put ALFRED_KEY in .dev.vars
+ANTHROPIC_API_KEY=... npm run try -- "skip this song" "text mom I'm 10 minutes late"   # Claude, prints timing
 npx wrangler tail        # live logs from the deployed Worker
 ```
 

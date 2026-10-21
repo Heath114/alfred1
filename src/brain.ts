@@ -97,32 +97,60 @@ If they asked a question, answer it in one or two sentences with no steps.
 steps and say so briefly ("I can't do that yet." / "Sorry, say that again?").
 - Current local time: given in the message. Use it for "tonight", "in 20 minutes", "tomorrow at 7".`;
 
-export const DEFAULT_MODEL = "claude-opus-5-5";
+// Something that answers SYSTEM + a user message with JSON matching SCHEMA (parsed or as text).
+export type Think = (system: string, user: string) => Promise<unknown>;
 
-export async function interpret(client: Anthropic, cmd: Command, model = DEFAULT_MODEL): Promise<Reply> {
+export const CLAUDE_MODEL = "claude-opus-5-5";
+export const WORKERS_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+export async function interpret(think: Think, cmd: Command): Promise<Reply> {
   const text = cmd.text.trim();
   if (!text) return { say: "Sorry, I didn't catch that.", steps: [] };
+  const out = await think(SYSTEM, `Local time: ${cmd.now || "unknown"}\nCommand: ${text}`);
+  return clean(typeof out === "string" ? JSON.parse(out) : (out as Reply));
+}
 
-  const response = await client.beta.messages.create({
-    model,
-    max_tokens: 2048,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    // Voice is latency-bound: these are short, well-specified mappings.
-    output_config: { effort: "low", format: { type: "json_schema", schema: SCHEMA } },
-    system: SYSTEM,
-    messages: [{ role: "user", content: `Local time: ${cmd.now || "unknown"}\nCommand: ${text}` }],
-  });
+// Cloudflare Workers AI: runs on the Cloudflare account, no other key needed.
+export function workersAi(ai: Ai, model = WORKERS_AI_MODEL): Think {
+  return async (system, user) => {
+    const result = (await ai.run(model as any, {
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      response_format: { type: "json_schema", json_schema: SCHEMA },
+      max_tokens: 1024,
+      temperature: 0,
+    } as any)) as { response?: unknown };
+    if (result?.response == null) throw new Error("Workers AI returned no response");
+    return result.response;
+  };
+}
 
-  if (response.stop_reason === "refusal") return { say: "I can't help with that.", steps: [] };
-  const block = response.content.find((b) => b.type === "text");
-  if (!block || block.type !== "text") throw new Error(`no text in response (stop_reason ${response.stop_reason})`);
-  return clean(JSON.parse(block.text));
+// Claude, when ANTHROPIC_API_KEY is set: better at messy dictation and multi-step commands.
+export function claude(client: Anthropic, model = CLAUDE_MODEL): Think {
+  return async (system, user) => {
+    const response = await client.beta.messages.create({
+      model,
+      max_tokens: 2048,
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      // Voice is latency-bound: these are short, well-specified mappings.
+      output_config: { effort: "low", format: { type: "json_schema", schema: SCHEMA } },
+      system,
+      messages: [{ role: "user", content: user }],
+    });
+    if (response.stop_reason === "refusal") return { say: "I can't help with that.", steps: [] };
+    const block = response.content.find((b) => b.type === "text");
+    if (!block || block.type !== "text") throw new Error(`no text in response (stop_reason ${response.stop_reason})`);
+    return block.text;
+  };
 }
 
 // The schema already constrains the shape; this keeps numbers in range and drops anything unexpected,
 // because the Shortcut acts on the phone without asking.
 export function clean(raw: Reply): Reply {
+  if (typeof raw !== "object" || raw === null) throw new Error("reply is not an object");
   const steps = (raw.steps ?? [])
     .filter((s) => (ACTIONS as readonly string[]).includes(s.do))
     .map((s) => {

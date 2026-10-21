@@ -3,7 +3,22 @@ import assert from "node:assert/strict";
 import worker from "../src/worker.ts";
 import { clean } from "../src/brain.ts";
 
-const env = { ANTHROPIC_API_KEY: "sk-test", ALFRED_KEY: "secret" };
+// Workers AI stand-in: records each call and answers with `response`.
+function fakeAi(response: unknown) {
+  const calls: { model: string; input: any }[] = [];
+  const ai = {
+    run: async (model: string, input: unknown) => {
+      calls.push({ model, input });
+      if (response instanceof Error) throw response;
+      return { response };
+    },
+  } as unknown as Ai;
+  return { ai, calls };
+}
+
+const unusedAi = fakeAi(new Error("Workers AI should not be called")).ai;
+// With ANTHROPIC_API_KEY set, Claude is used.
+const env = { AI: unusedAi, ANTHROPIC_API_KEY: "sk-test", ALFRED_KEY: "secret" };
 const realFetch = globalThis.fetch;
 afterEach(() => (globalThis.fetch = realFetch));
 
@@ -30,20 +45,43 @@ function fakeApi(reply: unknown, extra: Record<string, unknown> = {}) {
   return seen;
 }
 
-function command(body: unknown, key = "secret") {
+function command(body: unknown, key = "secret", withEnv: Parameters<typeof worker.fetch>[1] = env) {
   return worker.fetch(
     new Request("https://alfred.example/command", {
       method: "POST",
       headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
       body: JSON.stringify(body),
     }),
-    env,
+    withEnv,
   );
 }
 
 const step = (s: Partial<Record<string, unknown>>) => ({ value: 0, text: "", who: "", url: "", when: "", ...s });
 
-test("skip this song becomes a next step", async () => {
+test("without an Anthropic key, Workers AI does the thinking", async () => {
+  const { ai, calls } = fakeAi({ say: "", steps: [step({ do: "next" })] });
+  const res = await command({ text: "skip this song", now: "2026-10-21T14:05:00+03:00" }, "secret", { AI: ai, ALFRED_KEY: "secret" });
+  assert.deepEqual(await res.json(), { say: "", steps: [step({ do: "next" })] });
+  assert.equal(calls[0].model, "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  assert.equal(calls[0].input.response_format.type, "json_schema");
+  assert.equal(calls[0].input.messages[0].role, "system");
+  assert.match(calls[0].input.messages[1].content, /Command: skip this song/);
+});
+
+test("Workers AI: MODEL override, JSON returned as text, and failures", async () => {
+  const text = fakeAi(JSON.stringify({ say: "Done.", steps: [step({ do: "timer", value: 600 })] }));
+  const res = await command({ text: "ten minute timer" }, "secret", { AI: text.ai, ALFRED_KEY: "secret", MODEL: "@cf/other/model" });
+  assert.deepEqual(await res.json(), { say: "Done.", steps: [step({ do: "timer", value: 600 })] });
+  assert.equal(text.calls[0].model, "@cf/other/model");
+
+  for (const bad of [new Error("quota"), "not json", null]) {
+    const body = (await (await command({ text: "pause" }, "secret", { AI: fakeAi(bad).ai, ALFRED_KEY: "secret" })).json()) as any;
+    assert.deepEqual(body.steps, []);
+    assert.match(body.say, /Sorry/);
+  }
+});
+
+test("skip this song becomes a next step (Claude)", async () => {
   const seen = fakeApi({ say: "", steps: [step({ do: "next" })] });
   const res = await command({ text: "skip this song", now: "2026-10-21T14:05:00+03:00" });
   assert.equal(res.status, 200);
@@ -59,7 +97,7 @@ test("skip this song becomes a next step", async () => {
   assert.match(body.messages[0].content, /Local time: 2026-10-21T14:05:00\+03:00\nCommand: skip this song/);
 });
 
-test("MODEL overrides the model", async () => {
+test("MODEL overrides the Claude model", async () => {
   const seen = fakeApi({ say: "", steps: [] });
   await worker.fetch(
     new Request("https://alfred.example/command", {

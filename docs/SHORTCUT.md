@@ -98,8 +98,8 @@ Pick phrases that don't start with "Hey Alfred" so iOS doesn't confuse them with
 
 ## If something's off
 
-- **It says "my brain isn't answering":** the Worker couldn't reach Claude. Check the API key:
-  `npx wrangler tail` on your computer shows the error live.
+- **It says "my brain isn't answering":** the Worker's AI call failed (or the free daily
+  allowance ran out). `npx wrangler tail` on your computer shows the error live.
 - **Nothing happens and nothing is said:** open the shortcut, tap ▶︎, and watch which action
   stops. Usually the URL, or the `Authorization` header is missing the word `Bearer `.
 - **Music pauses while you talk and stays paused after "skip":** dictation can take over the

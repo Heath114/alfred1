@@ -1,8 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { DEFAULT_MODEL, interpret, type Command } from "./brain.ts";
+import { claude, interpret, workersAi, type Command } from "./brain.ts";
 
 export interface Env {
-  ANTHROPIC_API_KEY: string;
+  AI: Ai;
+  // Optional. When set, Claude does the thinking instead of Workers AI.
+  ANTHROPIC_API_KEY?: string;
   // Shared secret the Shortcut sends as "Authorization: Bearer <ALFRED_KEY>".
   ALFRED_KEY: string;
   MODEL?: string;
@@ -27,8 +29,10 @@ export default {
     }
 
     try {
-      const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 1, timeout: 20_000 });
-      return json(await interpret(client, cmd, env.MODEL || DEFAULT_MODEL));
+      const think = env.ANTHROPIC_API_KEY
+        ? claude(new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 1, timeout: 20_000 }), env.MODEL || undefined)
+        : workersAi(env.AI, env.MODEL || undefined);
+      return json(await interpret(think, cmd));
     } catch (err) {
       console.error(err);
       // Still a 200 with the usual shape, so the Shortcut just speaks the problem.
