@@ -40,10 +40,13 @@ tapping it → Rename, so they're easy to pick):
 - **Get Dictionary Value** `url` in **Repeat Item** → rename **URL**
 - **Get Dictionary Value** `when` in **Repeat Item** → rename **When**
 
-Then add one **If** per row, one after another (not nested inside each other). Each is
-**If Do is `<word>`** → the action → **End If**.
+Shortcuts treats **Do** as "Anything", so an If on it only offers "has any value". Turn it into
+text first: add a **Text** action right after the six, and put only the **Do** variable in its box.
 
-| If Do is | Action inside the If |
+Then add one **If** per row, one after another (not nested inside each other). Each is
+**If Text is `<word>`** (Text = that Text action's output) → the action → **End If**.
+
+| If Text is | Action inside the If |
 |---|---|
 | `next` | **Skip Forward** |
 | `previous` | **Skip Back** |
