@@ -24,6 +24,7 @@ const pretend: Hands = {
   telegramSend: async (chat, text) => (show(`Telegram to ${chat}: ${text}`), { chat }),
   saveFile: async (folder, name, content) => (show(`save ~/Alfred/${folder}/${name}: ${content}`), `~/Alfred/${folder}/${name}`),
   openApp: async (name) => show(`open ${name}`),
+  addReminder: async (text, when) => show(`reminder: ${text}${when ? ` at ${when}` : ""}`),
   macMedia: async (action, level) => (show(`Mac music: ${action}${action === "volume" ? ` ${level}` : ""}`), action),
 };
 

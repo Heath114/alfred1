@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { runAgent } from "../src/agent.ts";
-import { findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, sendMessage, textFromAttributedBody } from "../src/mac.ts";
+import { reminderArgs, findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, sendMessage, textFromAttributedBody } from "../src/mac.ts";
 import { modelAvailable, ollama, openaiCompatible, type ChatMessage, type Chat } from "../src/ollama.ts";
 import { bark, encryptForBark, everywhere } from "../src/notify.ts";
 import { createDecipheriv } from "node:crypto";
+import { alfredShortcut, toPlist } from "../src/shortcut.ts";
+import { ACTIONS } from "../src/steps.ts";
 import { alfred, type Config } from "../src/server.ts";
 import { namedInCommand, noPlaceholders, realName, type Hands, type Turn } from "../src/tools.ts";
 
@@ -29,6 +31,8 @@ function setup(folder: string, chat: Chat, hands: Hands, over: Partial<Config> =
   const config: Config = {
     key: "k",
     folder,
+    stateDir: folder,
+    logFile: join(folder, "alfred.log"),
     chat,
     hands,
     notify: async (n) => void notes.push(`${n.title}: ${n.body}`),
@@ -61,6 +65,7 @@ function fakeHands(over: Partial<Hands> = {}) {
     telegramSend: async (chat, text) => (did.push(`telegram ${chat}: ${text}`), { chat }),
     saveFile: async (folder, name, content) => (did.push(`file ${folder}/${name}: ${content}`), `/Users/me/Alfred/${folder}/${name}`),
     openApp: async (name) => void did.push(`open ${name}`),
+    addReminder: async (text, when) => void did.push(`reminder ${text}${when ? ` @ ${when}` : ""}`),
     macMedia: async (action, level) => (did.push(`mac ${action}${action === "volume" ? ` ${level}` : ""}`), action),
     ...over,
   };
@@ -148,6 +153,22 @@ test("calls are looked up on the Mac and become a tel: link for the phone", asyn
   const reply = await runAgent({ text: "call my partner" }, { chat, hands, people: { partner: "Sam Haddad" } });
   assert.deepEqual(reply.steps.map((s) => [s.do, s.url]), [["open", "tel:+962791112222"]]);
   assert.match(seen[2].at(-1)!.content, /No contact named \\"Omar\\"/);
+});
+
+test("reminders go to the Reminders app with a checked time", async () => {
+  const { hands, did } = fakeHands();
+  const { chat, seen } = scripted(
+    call("add_reminder", { text: "call the bank", when: "tomorrow 10am" }),
+    call("add_reminder", { text: "call the bank", when: "2026-10-23 10:00" }),
+    call("phone", { action: "reminder", text: "x" }),
+    say("Reminder set."),
+  );
+  await runAgent({ text: "remind me to call the bank tomorrow at 10" }, { chat, hands });
+  assert.deepEqual(did, ["reminder call the bank @ 2026-10-23 10:00"]);
+  assert.match(seen[1].at(-1)!.content, /when must look like/);
+  assert.match(seen[3].at(-1)!.content, /Use add_reminder/);
+  assert.deepEqual(reminderArgs("Pay rent", "2026-11-01 09:05"), ["Pay rent", "2026", "11", "1", "9", "5"]);
+  assert.deepEqual(reminderArgs("Pay rent", ""), ["Pay rent"]);
 });
 
 test("empty command needs no model", async () => {
@@ -680,4 +701,104 @@ test("server: auth, bad input, and a full command", async () => {
   } finally {
     server.close();
   }
+});
+
+// Everything below checks the generated Shortcut the way Shortcuts reads it.
+type Act = { WFWorkflowActionIdentifier: string; WFWorkflowActionParameters: Record<string, any> };
+
+function walk(v: unknown, visit: (o: Record<string, any>) => void) {
+  if (Array.isArray(v)) v.forEach((x) => walk(x, visit));
+  else if (v && typeof v === "object") {
+    visit(v as Record<string, any>);
+    Object.values(v).forEach((x) => walk(x, visit));
+  }
+}
+
+function checkShortcut(sc: Record<string, any>) {
+  const actions = sc.WFWorkflowActions as Act[];
+  const defined = new Set<string>();
+  const stack: { group: string; id: string; modes: number[] }[] = [];
+  for (const a of actions) {
+    assert.match(a.WFWorkflowActionIdentifier, /^(is\.workflow\.actions\.|com\.apple\.)/);
+    const p = a.WFWorkflowActionParameters;
+    // Every output used must come from an action earlier in the shortcut.
+    walk(p, (o) => {
+      if (o.Type === "ActionOutput") assert.ok(defined.has(o.OutputUUID), `${a.WFWorkflowActionIdentifier} uses an output defined later`);
+      if (o.WFSerializationType === "WFTextTokenString" && o.Value.attachmentsByRange) {
+        for (const range of Object.keys(o.Value.attachmentsByRange)) {
+          const [, at, len] = /^\{(\d+), (\d+)\}$/.exec(range)!.map(Number);
+          assert.equal(len, 1);
+          assert.equal(o.Value.string[at], "\ufffc", "an attachment sits on the placeholder character");
+        }
+      }
+    });
+    if (p.UUID) {
+      assert.ok(!defined.has(p.UUID), "UUIDs are unique");
+      defined.add(p.UUID);
+    }
+    // If/Otherwise/End If and Repeat/End Repeat open and close in order.
+    if (p.GroupingIdentifier) {
+      assert.equal(typeof p.WFControlFlowMode, "number");
+      if (p.WFControlFlowMode === 0) {
+        stack.push({ group: p.GroupingIdentifier, id: a.WFWorkflowActionIdentifier, modes: [0] });
+        if (a.WFWorkflowActionIdentifier.endsWith("conditional")) {
+          assert.equal(typeof p.WFCondition, "number");
+          assert.equal(p.WFInput.Type, "Variable");
+          assert.equal(p.WFInput.Variable.WFSerializationType, "WFTextTokenAttachment");
+        }
+      } else {
+        const top = stack.at(-1)!;
+        assert.equal(top.group, p.GroupingIdentifier, "blocks nest properly");
+        assert.equal(top.id, a.WFWorkflowActionIdentifier);
+        top.modes.push(p.WFControlFlowMode);
+        if (p.WFControlFlowMode === 2) {
+          assert.ok(["0,2", "0,1,2"].includes(top.modes.join(",")));
+          stack.pop();
+        }
+      }
+    }
+  }
+  assert.equal(stack.length, 0, "every block is closed");
+  return actions;
+}
+
+test("the generated Alfred Shortcut is well-formed and handles every phone action", () => {
+  const sc = alfredShortcut({ url: "https://mac.tail1234.ts.net/command", key: "s3cr&t<key>" });
+  const actions = checkShortcut(sc);
+  const ids = actions.map((a) => a.WFWorkflowActionIdentifier.replace("is.workflow.actions.", ""));
+
+  // One branch per action word the server can send, and nothing else.
+  const words = actions
+    .filter((a) => a.WFWorkflowActionIdentifier.endsWith("conditional") && a.WFWorkflowActionParameters.WFCondition === 4)
+    .map((a) => a.WFWorkflowActionParameters.WFConditionalActionString)
+    .filter((w) => w !== "on");
+  assert.deepEqual([...words].sort(), [...ACTIONS].sort());
+
+  // Voice on the iPhone, typing on the Mac, and input handed over by Run Shortcut / share sheet.
+  assert.ok(ids.includes("dictatetext") && ids.includes("ask") && ids.includes("detect.text"));
+  const request = actions.find((a) => a.WFWorkflowActionIdentifier.endsWith("downloadurl"))!.WFWorkflowActionParameters;
+  assert.equal(request.WFURL, "https://mac.tail1234.ts.net/command");
+  assert.equal(request.WFHTTPMethod, "POST");
+  assert.equal(request.WFHTTPHeaders.Value.WFDictionaryFieldValueItems[0].WFValue.Value.string, "Bearer s3cr&t<key>");
+  assert.deepEqual(
+    request.WFJSONValues.Value.WFDictionaryFieldValueItems.map((f: any) => f.WFKey.Value.string),
+    ["text", "now", "device"],
+  );
+  assert.equal(sc.WFWorkflowHasShortcutInputVariables, true);
+
+  const typed = alfredShortcut({ url: "https://x/command", key: "k", typed: true });
+  const typedIds = checkShortcut(typed).map((a) => a.WFWorkflowActionIdentifier);
+  assert.ok(typedIds.includes("is.workflow.actions.ask") && !typedIds.includes("is.workflow.actions.dictatetext"));
+});
+
+test("the plist is valid XML that round-trips", async (t) => {
+  const sc = alfredShortcut({ url: "https://mac.tail1234.ts.net/command", key: "s3cr&t<key>" });
+  const xml = toPlist(sc);
+  assert.match(xml, /<string>Bearer s3cr&amp;t&lt;key&gt;<\/string>/);
+  assert.match(xml, /<key>WFControlFlowMode<\/key>\n\t*<integer>0<\/integer>/);
+  const { spawnSync } = await import("node:child_process");
+  const py = spawnSync("python3", ["-c", "import plistlib,json,sys; print(json.dumps(plistlib.loads(sys.stdin.buffer.read())))"], { input: xml });
+  if (py.error) return t.skip("python3 not available");
+  assert.equal(py.status, 0, String(py.stderr));
+  assert.deepEqual(JSON.parse(String(py.stdout)), JSON.parse(JSON.stringify(sc)));
 });

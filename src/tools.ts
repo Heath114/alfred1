@@ -25,6 +25,7 @@ export interface Hands {
   telegramSend(chat: string, text: string): Promise<{ chat: string }>;
   saveFile(folder: string, name: string, content: string): Promise<string>;
   openApp(name: string): Promise<void>;
+  addReminder(text: string, when: string): Promise<void>; // when: "YYYY-MM-DD HH:MM" or ""
   macMedia(action: MacMedia, level: number): Promise<string>;
 }
 
@@ -136,11 +137,10 @@ next/previous/pause/play: whatever app is playing music or audio.
 volume, brightness: value 0-100. Relative requests: up 75, a bit up 60, down 30, a bit down 40, mute 0.
 flashlight, focus (Do Not Disturb): text "on" or "off".
 timer: value in seconds. alarm: text "HH:MM" 24h.
-reminder: text what, when "YYYY-MM-DD HH:MM" or "".
 call: who is the contact name (Alfred looks up the number).
 open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, whatsapp:, https://...).`,
     {
-      action: { type: "string", enum: ACTIONS.filter((a) => a !== "message") },
+      action: { type: "string", enum: [...ACTIONS, "call"] },
       value: { type: "number" },
       text: { type: "string" },
       who: { type: "string" },
@@ -150,9 +150,9 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
     ["action"],
     async (a, turn) => {
       const action = str(a.action);
-      if (!(ACTIONS as readonly string[]).includes(action) || action === "message") {
-        throw new Error(`Unknown phone action "${action}". To text someone use messages_send.`);
-      }
+      if (action === "message") throw new Error("To text someone use messages_send.");
+      if (action === "reminder") throw new Error("Use add_reminder.");
+      if (action !== "call" && !(ACTIONS as readonly string[]).includes(action)) throw new Error(`Unknown phone action "${action}".`);
       if (action === "call") {
         // Look the number up here, so the phone only has to open a tel: link.
         const c = await contactFor(str(a.who), turn);
@@ -264,6 +264,18 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
     { folder: { type: "string" }, name: { type: "string", description: "File name, e.g. notes.txt" }, content: { type: "string" } },
     ["name", "content"],
     async (a, turn) => ({ saved: await turn.hands.saveFile(str(a.folder), str(a.name), noPlaceholders(String(a.content ?? ""))) }),
+  ),
+  tool(
+    "add_reminder",
+    "Add a reminder (Reminders app; it syncs to the owner's iPhone and alerts there).",
+    { text: { type: "string" }, when: { type: "string", description: 'Local time "YYYY-MM-DD HH:MM" to be alerted, or "" for none' } },
+    ["text"],
+    async (a, turn) => {
+      const when = str(a.when);
+      if (when && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(when)) throw new Error('when must look like "2026-10-23 07:30".');
+      await turn.hands.addReminder(noPlaceholders(str(a.text)), when);
+      return { added: str(a.text), when: when || "no alert" };
+    },
   ),
   tool(
     "open_mac_app",

@@ -3,8 +3,8 @@
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { platform } from "node:os";
+import { dirname, join } from "node:path";
 import { runAgent, systemPrompt } from "./agent.ts";
 import * as mac from "./mac.ts";
 import { bark, everywhere, macNotification, type Notify } from "./notify.ts";
@@ -15,11 +15,14 @@ export const DEFAULT_MODEL = "qwen3.5:9b";
 import { clean, type Command, type Step } from "./steps.ts";
 import { SESSION_FILE, telegram } from "./telegram.ts";
 import { toolsFor, type Hands } from "./tools.ts";
+import { paths } from "./paths.ts";
 import { waits } from "./waits.ts";
 
 export interface Config {
   key: string;
-  folder: string; // where Alfred saves files, people.json and its log
+  folder: string; // the owner's Alfred folder: people.json and saved files
+  stateDir: string; // Alfred's own state (pending waits)
+  logFile: string;
   chat: Chat;
   hands: Hands;
   notify: Notify;
@@ -35,13 +38,14 @@ export interface Config {
 
 export function configFromEnv(env = process.env): Config {
   if (!env.ALFRED_KEY) throw new Error("Set ALFRED_KEY in .env (the password the Shortcut sends).");
-  const folder = env.ALFRED_FOLDER || join(homedir(), "Alfred");
+  const folder = paths.files;
   const tgConfigured = Boolean(env.TELEGRAM_API_ID && env.TELEGRAM_API_HASH);
   const tgApi = tgConfigured ? telegram(Number(env.TELEGRAM_API_ID), env.TELEGRAM_API_HASH!) : null;
   const noTelegram = async (): Promise<never> => {
     throw new Error("Telegram isn't set up (npm run setup).");
   };
-  const log = logger(folder);
+  const logFile = join(paths.logs, "alfred.log");
+  const log = logger(logFile);
   // MODEL_URL points at an OpenAI-style local server (LM Studio etc.); without it, Ollama.
   const model = env.MODEL || (env.MODEL_URL ? "qwen3.5-9b" : DEFAULT_MODEL);
   const channels: Notify[] = [];
@@ -59,6 +63,8 @@ export function configFromEnv(env = process.env): Config {
   return {
     key: env.ALFRED_KEY,
     folder,
+    stateDir: paths.state,
+    logFile,
     chat: env.MODEL_URL
       ? openaiCompatible(model, env.MODEL_URL)
       : ollama(model, env.OLLAMA_HOST, Number(env.CONTEXT_LENGTH) || undefined),
@@ -73,6 +79,7 @@ export function configFromEnv(env = process.env): Config {
       telegramSend: tgApi ? tgApi.send : noTelegram,
       saveFile: (dir, name, content) => mac.saveFile(folder, dir, name, content),
       openApp: mac.openApp,
+      addReminder: mac.addReminder,
       macMedia: mac.macMedia,
     },
     notify: everywhere(channels, log),
@@ -84,9 +91,8 @@ export function configFromEnv(env = process.env): Config {
   };
 }
 
-function logger(folder: string) {
-  return (entry: object) =>
-    appendFile(join(folder, "alfred.log"), JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n").catch(() => {});
+function logger(file: string) {
+  return (entry: object) => appendFile(file, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n").catch(() => {});
 }
 
 // people.json maps what you call someone to their name in Contacts: {"partner": "Sam Haddad"}.
@@ -108,12 +114,12 @@ const late = (steps: Step[]) =>
   steps.length ? ` I couldn't do "${steps.map((s) => s.do).join(", ")}" on your phone because the Shortcut had already finished.` : "";
 
 export function alfred(config: Config) {
-  const log = logger(config.folder);
+  const log = logger(config.logFile);
 
   // When a reply arrives, run the rest of the instructions and say how it went. The phone isn't
   // listening by then, so phone steps can't run; the notification says so.
   const waiting = waits(
-    config.folder,
+    config.stateDir,
     config.hands,
     {
       async onReply(w, reply) {
@@ -254,7 +260,7 @@ function message(err: unknown): string {
 
 if (import.meta.main) {
   const config = configFromEnv();
-  await mkdir(config.folder, { recursive: true });
+  for (const dir of [config.folder, config.stateDir, dirname(config.logFile)]) await mkdir(dir, { recursive: true });
   const port = Number(process.env.PORT || 8787);
   const { handle, waiting, warmUp } = alfred(config);
   createServer(handle).listen(port, "127.0.0.1", () => console.log(`Alfred listening on http://127.0.0.1:${port}`));

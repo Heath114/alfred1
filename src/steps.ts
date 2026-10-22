@@ -1,20 +1,17 @@
-// Everything the iPhone Shortcut knows how to do. Each one is a branch in the Shortcut
-// (docs/SHORTCUT.md), so adding an action here means adding a branch there too.
+// Everything the iPhone Shortcut knows how to do: one branch each in the generated Shortcut
+// (src/shortcut.ts). Adding an action here means adding its branch there; a test checks they match.
 export const ACTIONS = [
   "next", // skip to the next track, in whatever app is playing
   "previous", // previous track / restart
   "pause",
   "play",
-  "volume", // value: 0-100
-  "brightness", // value: 0-100
+  "volume", // level: 0-1 (value: 0-100)
+  "brightness", // level: 0-1 (value: 0-100)
   "flashlight", // text: "on" | "off"
   "focus", // Do Not Disturb. text: "on" | "off"
   "timer", // value: seconds
   "alarm", // text: "HH:MM", 24h
-  "reminder", // text: what, when: "YYYY-MM-DD HH:MM" or ""
-  "message", // who: contact name, text: the message
-  "call", // who: contact name
-  "open", // url: app URL scheme or https link
+  "open", // url: app URL scheme, https link, or tel: for calls
 ] as const;
 
 export type Action = (typeof ACTIONS)[number];

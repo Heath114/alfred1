@@ -1,14 +1,13 @@
 // The owner's own Telegram account, through Telegram's official client API (MTProto via GramJS).
-// The login session lives only on this Mac: ~/.alfred/telegram.session, created by
-// `npm run telegram-login`.
+// The login session lives only on this Mac (~/.alfred/telegram.session), created during setup.
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import tg from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
+import { paths } from "./paths.ts";
 import type { Message } from "./tools.ts";
 
-export const SESSION_FILE = join(homedir(), ".alfred", "telegram.session");
+export const SESSION_FILE = join(paths.state, "telegram.session");
 
 type Client = InstanceType<typeof tg.TelegramClient>;
 
@@ -17,7 +16,7 @@ export function telegram(apiId: number, apiHash: string) {
 
   async function connect(): Promise<Client> {
     const session = await readFile(SESSION_FILE, "utf8").catch(() => {
-      throw new Error("Telegram isn't set up on the Mac yet (npm run telegram-login).");
+      throw new Error("Telegram isn't set up on the Mac yet (run setup again).");
     });
     const c = new tg.TelegramClient(new StringSession(session.trim()), apiId, apiHash, { connectionRetries: 3 });
     await c.connect();

@@ -328,3 +328,33 @@ export async function macMedia(action: MacMedia, level: number): Promise<string>
   await osascript(`tell application "${app}" to ${verb}`, []);
   return `${app}: ${verb}`;
 }
+
+// Reminders on the Mac sync to the iPhone through iCloud and alert there. The date is built from
+// numbers, so it doesn't depend on the Mac's date format.
+const ADD_REMINDER = `on run argv
+  set t to item 1 of argv
+  tell application "Reminders"
+    if (count of argv) > 1 then
+      set dt to current date
+      set day of dt to 1
+      set year of dt to (item 2 of argv) as integer
+      set month of dt to (item 3 of argv) as integer
+      set day of dt to (item 4 of argv) as integer
+      set hours of dt to (item 5 of argv) as integer
+      set minutes of dt to (item 6 of argv) as integer
+      set seconds of dt to 0
+      make new reminder with properties {name:t, remind me date:dt}
+    else
+      make new reminder with properties {name:t}
+    end if
+  end tell
+end run`;
+
+export function reminderArgs(text: string, when: string): string[] {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(when);
+  return m ? [text, ...m.slice(1).map((n) => String(Number(n)))] : [text];
+}
+
+export async function addReminder(text: string, when: string): Promise<void> {
+  await osascript(ADD_REMINDER, reminderArgs(text, when));
+}
