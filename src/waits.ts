@@ -6,7 +6,12 @@ import type { Hands, Waiting } from "./tools.ts";
 
 const DAY = 24 * 60 * 60 * 1000;
 
-export function waits(folder: string, hands: Hands, onReply: (w: Waiting, reply: string) => Promise<void>, log: (e: object) => void) {
+export function waits(
+  folder: string,
+  hands: Hands,
+  on: { onReply(w: Waiting, reply: string): Promise<void>; onGiveUp(w: Waiting): Promise<void> },
+  log: (e: object) => void,
+) {
   const file = join(folder, "waiting.json");
   let list: Waiting[] = [];
   let loaded = false;
@@ -42,8 +47,10 @@ export function waits(folder: string, hands: Hands, onReply: (w: Waiting, reply:
           if (!replies.length && !expired) continue;
           list = list.filter((x) => x !== w);
           await save();
-          if (expired) log({ gave_up_waiting_for: w.contact, then: w.then });
-          else await onReply(w, replies.map((r) => r.text).join("\n")).catch((err) => log({ error: String(err), after_reply_from: w.contact }));
+          const handled = expired
+            ? (log({ gave_up_waiting_for: w.contact, then: w.then }), on.onGiveUp(w))
+            : on.onReply(w, replies.map((r) => r.text).join("\n"));
+          await handled.catch((err) => log({ error: String(err), waiting_for: w.contact }));
         }
       } finally {
         checking = false;

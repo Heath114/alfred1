@@ -38,6 +38,16 @@ export interface Command {
   text: string;
   // The phone's local time, e.g. "2026-10-21T14:05:00+03:00". Needed for alarms and reminders.
   now?: string;
+  // Where the command came from: "iPhone"/"iPad" (Shortcut), "Mac" (Shortcut or the alfred command).
+  device?: string;
+  // The alfred command waits for the whole job; the Shortcut gets an early answer instead.
+  wait?: boolean;
+}
+
+export type Device = "phone" | "mac";
+
+export function deviceOf(device?: string): Device {
+  return /mac|cli/i.test(device ?? "") ? "mac" : "phone";
 }
 
 // Keeps numbers in range and drops anything unexpected, because the Shortcut acts on the phone

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Talk to Alfred from the Mac's Terminal:
+#   alfred "save my partner's last message to a file"
+#   alfred            (no words: a chat prompt, until you type "bye" or press Ctrl-D)
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec node --disable-warning=ExperimentalWarning --experimental-strip-types "$DIR/scripts/cli.ts" "$@"

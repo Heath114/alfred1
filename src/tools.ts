@@ -1,4 +1,4 @@
-import { ACTIONS, type Step } from "./steps.ts";
+import { ACTIONS, type Device, type Step } from "./steps.ts";
 import type { ToolSpec } from "./ollama.ts";
 
 export interface Contact {
@@ -25,7 +25,10 @@ export interface Hands {
   telegramSend(chat: string, text: string): Promise<{ chat: string }>;
   saveFile(folder: string, name: string, content: string): Promise<string>;
   openApp(name: string): Promise<void>;
+  macMedia(action: MacMedia, level: number): Promise<string>;
 }
+
+export type MacMedia = "next" | "previous" | "pause" | "play" | "volume";
 
 // "Do the rest when Sam answers": kept by src/waits.ts until a reply arrives.
 export interface Waiting {
@@ -38,6 +41,7 @@ export interface Waiting {
 }
 
 export interface Turn {
+  device: Device; // where the owner is talking from
   command: string; // what the owner said, verbatim: sends are only allowed to people named in it
   people: Record<string, string>; // "partner" -> "Sam Haddad", from people.json
   steps: Step[]; // phone actions queued for the Shortcut
@@ -48,18 +52,29 @@ export interface Turn {
 
 interface Tool {
   spec: ToolSpec;
+  only?: Device; // offered only when the owner talks from this device
   run(args: Record<string, unknown>, turn: Turn): Promise<unknown>;
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const num = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? v : Number(v) || fallback);
 
-function tool(name: string, description: string, properties: Record<string, unknown>, required: string[], run: Tool["run"]): Tool {
+function tool(
+  name: string,
+  description: string,
+  properties: Record<string, unknown>,
+  required: string[],
+  run: Tool["run"],
+  only?: Device,
+): Tool {
   return {
     spec: { type: "function", function: { name, description, parameters: { type: "object", properties, required } } },
+    only,
     run,
   };
 }
+
+export const toolsFor = (device: Device) => TOOLS.filter((t) => !t.only || t.only === device);
 
 // "partner" -> the real name from people.json; anything else unchanged.
 export function realName(who: string, turn: Turn): string {
@@ -137,6 +152,19 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
       });
       return { queued: action };
     },
+    "phone",
+  ),
+  tool(
+    "mac_media",
+    "Control music on the Mac (Spotify or Music, whichever is open) and the Mac's volume (value 0-100).",
+    { action: { type: "string", enum: ["next", "previous", "pause", "play", "volume"] }, value: { type: "number" } },
+    ["action"],
+    async (a, turn) => {
+      const action = str(a.action) as MacMedia;
+      if (!["next", "previous", "pause", "play", "volume"].includes(action)) throw new Error(`Unknown action "${action}".`);
+      return { done: await turn.hands.macMedia(action, Math.min(100, Math.max(0, num(a.value, 50)))) };
+    },
+    "mac",
   ),
   tool(
     "messages_read",

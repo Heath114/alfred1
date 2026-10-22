@@ -18,7 +18,12 @@ export interface ToolSpec {
 
 export type Chat = (messages: ChatMessage[], tools: ToolSpec[]) => Promise<ChatMessage>;
 
-export function ollama(model: string, host = "http://127.0.0.1:11434"): Chat {
+// Ollama's default context window is small (2048-4096 tokens depending on version) and it silently
+// drops the start of anything longer: the instructions and tool list go first, and the model then
+// behaves as if it never had them. Alfred's prompt + tools + a few rounds need about 4-6k.
+const CONTEXT = 12288;
+
+export function ollama(model: string, host = "http://127.0.0.1:11434", contextLength = CONTEXT): Chat {
   return async (messages, tools) => {
     const res = await fetch(`${host}/api/chat`, {
       method: "POST",
@@ -30,7 +35,7 @@ export function ollama(model: string, host = "http://127.0.0.1:11434"): Chat {
         stream: false,
         think: false, // reasoning models are much slower with it on; commands are short
         keep_alive: "60m", // stay loaded between commands
-        options: { temperature: 0 },
+        options: { temperature: 0, num_ctx: contextLength },
       }),
     });
     if (!res.ok) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -82,4 +87,21 @@ export function openaiCompatible(model: string, baseUrl: string): Chat {
       tool_calls: msg.tool_calls?.map((c) => ({ function: { name: c.function.name, arguments: c.function.arguments } })),
     };
   };
+}
+
+// For the status check: is the model server up, and does it have the model?
+export async function modelAvailable(model: string, openaiUrl?: string, ollamaHost = "http://127.0.0.1:11434"): Promise<void> {
+  const url = openaiUrl ? `${openaiUrl.replace(/\/$/, "")}/models` : `${ollamaHost}/api/tags`;
+  let res: Response;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+  } catch {
+    throw new Error(openaiUrl ? `No model server at ${openaiUrl}.` : "Ollama isn't running.");
+  }
+  const data = (await res.json()) as { models?: { name: string }[]; data?: { id: string }[] };
+  const names = openaiUrl ? (data.data ?? []).map((m) => m.id) : (data.models ?? []).map((m) => m.name);
+  const wanted = (name: string) => name === model || name === `${model}:latest` || name.startsWith(`${model}@`);
+  if (!names.some(wanted)) {
+    throw new Error(openaiUrl ? `Model "${model}" isn't loaded.` : `Model "${model}" isn't downloaded (ollama pull ${model}).`);
+  }
 }

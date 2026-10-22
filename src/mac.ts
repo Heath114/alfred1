@@ -1,11 +1,12 @@
 // macOS hands: Contacts and Messages through AppleScript, message history straight from the Messages
 // database, files in the Alfred folder. Needs the permissions in docs/MAC_SETUP.md.
 import { execFile } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type { Contact, Message } from "./tools.ts";
+import type { Contact, MacMedia, Message } from "./tools.ts";
 
 const run = promisify(execFile);
 
@@ -23,8 +24,73 @@ const FIND_CONTACTS = `function run(argv) {
   })));
 }`;
 
-export async function findContacts(name: string): Promise<Contact[]> {
+// Contacts are read straight from the AddressBook databases (iCloud and local accounts each have
+// one). That's instant and covered by the Full Disk Access Alfred needs anyway; asking the Contacts
+// app through AppleScript takes seconds on a big address book and needs another permission, so it's
+// only the fallback.
+export async function findContacts(name: string, root = join(homedir(), "Library/Application Support/AddressBook")): Promise<Contact[]> {
+  const dbs = addressBooks(root);
+  if (dbs.length) {
+    try {
+      return await contactsFromDbs(dbs, name);
+    } catch (err) {
+      // Locked out of the databases or an unexpected layout: fall through to the Contacts app.
+      if (!/authoriz|permission|not permitted|no such (table|column)/i.test(String(err))) throw err;
+    }
+  }
   return JSON.parse((await osascript(FIND_CONTACTS, [name], "JavaScript")) || "[]");
+}
+
+function addressBooks(root: string): string[] {
+  const found = [join(root, "AddressBook-v22.abcddb")];
+  try {
+    for (const source of readdirSync(join(root, "Sources"))) found.push(join(root, "Sources", source, "AddressBook-v22.abcddb"));
+  } catch {
+    // no Sources folder
+  }
+  return found.filter((f) => existsSync(f));
+}
+
+async function contactsFromDbs(dbs: string[], name: string): Promise<Contact[]> {
+  const want = `%${name.toLowerCase()}%`;
+  const byKey = new Map<string, Contact>();
+  for (const path of dbs) {
+    const db = await openDb(path);
+    try {
+      const people = db
+        .prepare(
+          `SELECT Z_PK AS id, trim(coalesce(ZFIRSTNAME, '') || ' ' || coalesce(ZLASTNAME, '')) AS full,
+             ZNICKNAME AS nick, ZORGANIZATION AS org
+           FROM ZABCDRECORD
+           WHERE lower(coalesce(ZFIRSTNAME, '') || ' ' || coalesce(ZLASTNAME, '')) LIKE ?
+              OR lower(coalesce(ZNICKNAME, '')) LIKE ? OR lower(coalesce(ZORGANIZATION, '')) LIKE ?
+           LIMIT 25`,
+        )
+        .all(want, want, want) as { id: number; full: string; nick: string | null; org: string | null }[];
+      for (const p of people) {
+        const phones = (db.prepare("SELECT ZFULLNUMBER AS v FROM ZABCDPHONENUMBER WHERE ZOWNER = ?").all(p.id) as { v: string | null }[])
+          .map((r) => r.v)
+          .filter((v): v is string => Boolean(v));
+        const emails = (db.prepare("SELECT ZADDRESS AS v FROM ZABCDEMAILADDRESS WHERE ZOWNER = ?").all(p.id) as { v: string | null }[])
+          .map((r) => r.v)
+          .filter((v): v is string => Boolean(v));
+        const contactName = p.full || p.nick || p.org || "";
+        if (!contactName) continue;
+        // The same person can be in several accounts; keep one copy with everything.
+        const key = contactName.toLowerCase();
+        const seen = byKey.get(key);
+        if (seen) {
+          seen.phones = [...new Set([...seen.phones, ...phones])];
+          seen.emails = [...new Set([...seen.emails, ...emails])];
+        } else {
+          byKey.set(key, { name: contactName, phones, emails });
+        }
+      }
+    } finally {
+      db.close();
+    }
+  }
+  return [...byKey.values()].slice(0, 10);
 }
 
 const SEND = `on run {target, body}
@@ -153,4 +219,27 @@ export async function saveFile(root: string, folder: string, name: string, conte
 
 export async function openApp(name: string): Promise<void> {
   await run("open", ["-a", name], { timeout: 15_000 });
+}
+
+async function isRunning(app: string): Promise<boolean> {
+  try {
+    await run("pgrep", ["-x", app]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Music on the Mac itself. Checking with pgrep first matters: an AppleScript that names an app
+// that isn't installed won't even compile, and asking a closed player to "pause" would launch it.
+export async function macMedia(action: MacMedia, level: number): Promise<string> {
+  if (action === "volume") {
+    await osascript(`set volume output volume ${Math.round(level)}`, []);
+    return `Mac volume ${Math.round(level)}`;
+  }
+  const app = (await isRunning("Spotify")) ? "Spotify" : (await isRunning("Music")) ? "Music" : null;
+  if (!app) throw new Error("Nothing is playing on the Mac: Spotify and Music are both closed.");
+  const verb = { next: "next track", previous: "previous track", pause: "pause", play: "play" }[action];
+  await osascript(`tell application "${app}" to ${verb}`, []);
+  return `${app}: ${verb}`;
 }

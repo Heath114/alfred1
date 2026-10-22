@@ -1,17 +1,21 @@
 import type { Chat, ChatMessage } from "./ollama.ts";
-import { clean, type Command, type Reply } from "./steps.ts";
-import { TOOLS, type Hands, type Turn, type Waiting } from "./tools.ts";
+import { clean, deviceOf, type Command, type Device, type Reply, type Step } from "./steps.ts";
+import { toolsFor, type Hands, type Turn, type Waiting } from "./tools.ts";
 
 const MAX_ROUNDS = 8;
 
-export function systemPrompt(people: Record<string, string>): string {
+export function systemPrompt(people: Record<string, string>, device: Device = "phone"): string {
   const known = Object.entries(people).map(([alias, name]) => `- "${alias}" means ${name}`).join("\n");
-  return `You are Alfred, the owner's personal assistant. You run on their Mac mini at home and they talk \
-to you from their iPhone. Do what the command asks by calling tools, one step at a time, in order. When \
-everything is done, reply with one short sentence that will be spoken aloud, or nothing at all for simple \
-music and volume commands.
+  const where =
+    device === "phone"
+      ? `The owner is talking to you from their iPhone. Phone things (music, volume, timers, alarms, \
+flashlight, opening phone apps) use the phone tool.`
+      : `The owner is at the Mac. Music and volume use mac_media. You can't control their iPhone from here.`;
+  return `You are Alfred, the owner's personal assistant. You run on their Mac mini at home. Do what the \
+command asks by calling tools, one step at a time, in order. When everything is done, reply with one short \
+sentence that will be spoken aloud, or nothing at all for simple music and volume commands.
 
-- Phone things (music, volume, timers, alarms, flashlight, opening phone apps) use the phone tool.
+- ${where}
 - Messages means iMessage/SMS. Telegram means the owner's Telegram account.
 - Write messages as the owner, in first person, in the language of the command unless told otherwise. \
 Fix obvious dictation mistakes.
@@ -35,15 +39,19 @@ export async function runAgent(
     // For a follow-up after a reply: the owner's original command (who may be messaged) and the
     // reply itself, which is shown to the model as information, never as the command.
     followUp?: { command: string; info: string };
+    // Phone steps are collected here, so the server can hand over the ones queued so far if it
+    // answers the phone before the job is finished.
+    steps?: Step[];
   },
 ): Promise<Reply> {
   const text = cmd.text.trim();
   if (!text) return { say: "Sorry, I didn't catch that.", steps: [] };
 
   const turn: Turn = {
+    device: deviceOf(cmd.device),
     command: opts.followUp?.command ?? text,
     people: opts.people ?? {},
-    steps: [],
+    steps: opts.steps ?? [],
     hands: opts.hands,
     sent: new Map(),
     wait: (w) => {
@@ -53,7 +61,7 @@ export async function runAgent(
   };
   const log = opts.log ?? (() => {});
   const messages: ChatMessage[] = [
-    { role: "system", content: systemPrompt(turn.people) },
+    { role: "system", content: systemPrompt(turn.people, turn.device) },
     {
       role: "user",
       content: opts.followUp
@@ -61,7 +69,8 @@ export async function runAgent(
         : `Local time: ${cmd.now || new Date().toISOString()}\nCommand: ${text}`,
     },
   ];
-  const specs = TOOLS.map((t) => t.spec);
+  const tools = toolsFor(turn.device);
+  const specs = tools.map((t) => t.spec);
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     const reply = await opts.chat(messages, specs);
@@ -75,7 +84,7 @@ export async function runAgent(
       let result: unknown;
       try {
         const args = typeof call.function.arguments === "string" ? JSON.parse(call.function.arguments) : call.function.arguments;
-        const tool = TOOLS.find((t) => t.spec.function.name === name);
+        const tool = tools.find((t) => t.spec.function.name === name);
         if (!tool) throw new Error(`No tool called ${name}.`);
         result = await tool.run(args ?? {}, turn);
         log({ tool: name, args, result });
