@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { runAgent } from "../src/agent.ts";
-import { messagesProblem, reminderArgs, findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, sendMessage, textFromAttributedBody } from "../src/mac.ts";
+import { newVolume, messagesProblem, reminderArgs, findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, sendMessage, textFromAttributedBody } from "../src/mac.ts";
 import { modelAvailable, ollama, openaiCompatible, type ChatMessage, type Chat } from "../src/ollama.ts";
 import { bark, encryptForBark, everywhere } from "../src/notify.ts";
 import { createDecipheriv } from "node:crypto";
@@ -69,7 +69,7 @@ function fakeHands(over: Partial<Hands> = {}) {
     saveFile: async (folder, name, content) => (did.push(`file ${folder}/${name}: ${content}`), `/Users/me/Alfred/${folder}/${name}`),
     openApp: async (name) => void did.push(`open ${name}`),
     addReminder: async (text, when) => void did.push(`reminder ${text}${when ? ` @ ${when}` : ""}`),
-    macMedia: async (action, level) => (did.push(`mac ${action}${action === "volume" ? ` ${level}` : ""}`), action),
+    macMedia: async (action, level, change) => (did.push(`mac ${action}${action === "volume" ? ` ${change ?? level}` : ""}`), action),
     ...over,
   };
   return { hands, did };
@@ -172,6 +172,26 @@ test("reminders go to the Reminders app with a checked time", async () => {
   assert.match(seen[3].at(-1)!.content, /Use add_reminder/);
   assert.deepEqual(reminderArgs("Pay rent", "2026-11-01 09:05"), ["Pay rent", "2026", "11", "1", "9", "5"]);
   assert.deepEqual(reminderArgs("Pay rent", ""), ["Pay rent"]);
+});
+
+test("relative volume: words on the phone map to levels, on the Mac they move from the current level", async () => {
+  const { hands, did } = fakeHands();
+  const { chat } = scripted(
+    call("phone", { action: "volume", change: "a bit quieter" }),
+    call("phone", { action: "brightness", change: "max" }),
+    call("phone", { action: "volume", value: 55 }),
+    say(""),
+  );
+  const out = await runAgent({ text: "a bit quieter, full brightness, volume 55" }, { chat, hands });
+  assert.deepEqual(out.steps.map((s) => [s.do, s.value, s.level]), [["volume", 40, 0.4], ["brightness", 100, 1], ["volume", 55, 0.55]]);
+
+  const mac = scripted(call("mac_media", { action: "volume", change: "a bit quieter" }), say(""));
+  await runAgent({ text: "a bit quieter", device: "Mac" }, { chat: mac.chat, hands });
+  assert.deepEqual(did, ["mac volume a bit quieter"]);
+  assert.equal(newVolume(50, "a bit quieter"), 40);
+  assert.equal(newVolume(95, "louder"), 100);
+  assert.equal(newVolume(20, "quieter"), 0);
+  assert.equal(newVolume(70, "mute"), 0);
 });
 
 test("empty command needs no model", async () => {

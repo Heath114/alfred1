@@ -26,7 +26,7 @@ export interface Hands {
   saveFile(folder: string, name: string, content: string): Promise<string>;
   openApp(name: string): Promise<void>;
   addReminder(text: string, when: string): Promise<void>; // when: "YYYY-MM-DD HH:MM" or ""
-  macMedia(action: MacMedia, level: number): Promise<string>;
+  macMedia(action: MacMedia, level: number, change?: Change): Promise<string>;
 }
 
 export type MacMedia = "next" | "previous" | "pause" | "play" | "volume";
@@ -129,12 +129,20 @@ async function contactFor(who: string, turn: Turn): Promise<Contact> {
   return pick[0];
 }
 
+// "Turn it down a bit": small models are unreliable at turning that into a number, so they pick
+// the word and the code does the math.
+export const CHANGES = ["louder", "a bit louder", "a bit quieter", "quieter", "mute", "max"] as const;
+export type Change = (typeof CHANGES)[number];
+const RELATIVE = `For "turn it up/down", "a bit", "mute" etc. set change instead of value.`;
+// The phone's current level can't be read, so changes there map to fixed levels.
+const PHONE_LEVEL: Record<Change, number> = { louder: 75, "a bit louder": 60, "a bit quieter": 40, quieter: 30, mute: 0, max: 100 };
+
 export const TOOLS: Tool[] = [
   tool(
     "phone",
     `Do something on the owner's iPhone. Runs right after you reply, in the order called. Actions:
 next/previous/pause/play: whatever app is playing music or audio.
-volume, brightness: value 0-100. Relative requests: up 75, a bit up 60, down 30, a bit down 40, mute 0.
+volume, brightness: value 0-100. ${RELATIVE}
 flashlight, focus (Do Not Disturb): text "on" or "off".
 timer: value in seconds. alarm: text "HH:MM" 24h.
 call: who is the contact name (Alfred looks up the number).
@@ -142,6 +150,7 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
     {
       action: { type: "string", enum: [...ACTIONS, "call"] },
       value: { type: "number" },
+      change: { type: "string", enum: [...CHANGES], description: "volume/brightness only" },
       text: { type: "string" },
       who: { type: "string" },
       url: { type: "string" },
@@ -160,22 +169,27 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
         turn.steps.push(step("open", { url: `tel:${c.phones[0].replace(/[^\d+]/g, "")}` }));
         return { calling: c.name };
       }
-      turn.steps.push(
-        step(action as Step["do"], { value: num(a.value, 0), text: str(a.text), url: str(a.url), when: str(a.when) }),
-      );
+      const change = CHANGES.find((c) => c === str(a.change));
+      const value = change && (action === "volume" || action === "brightness") ? PHONE_LEVEL[change] : num(a.value, 0);
+      turn.steps.push(step(action as Step["do"], { value, text: str(a.text), url: str(a.url), when: str(a.when) }));
       return { queued: action };
     },
     "phone",
   ),
   tool(
     "mac_media",
-    "Control music on the Mac (Spotify or Music, whichever is open) and the Mac's volume: value 0-100; relative requests: up 75, a bit up 60, down 30, a bit down 40, mute 0.",
-    { action: { type: "string", enum: ["next", "previous", "pause", "play", "volume"] }, value: { type: "number" } },
+    `Control music on the Mac (Spotify or Music, whichever is open) and the Mac's volume: value 0-100. ${RELATIVE}`,
+    {
+      action: { type: "string", enum: ["next", "previous", "pause", "play", "volume"] },
+      value: { type: "number" },
+      change: { type: "string", enum: [...CHANGES] },
+    },
     ["action"],
     async (a, turn) => {
       const action = str(a.action) as MacMedia;
       if (!["next", "previous", "pause", "play", "volume"].includes(action)) throw new Error(`Unknown action "${action}".`);
-      return { done: await turn.hands.macMedia(action, Math.min(100, Math.max(0, num(a.value, 50)))) };
+      const level = Math.min(100, Math.max(0, num(a.value, 50)));
+      return { done: await turn.hands.macMedia(action, level, CHANGES.find((c) => c === str(a.change))) };
     },
     "mac",
   ),

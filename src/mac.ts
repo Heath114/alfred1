@@ -6,7 +6,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type { Contact, MacMedia, Message } from "./tools.ts";
+import type { Change, Contact, MacMedia, Message } from "./tools.ts";
 
 const run = promisify(execFile);
 
@@ -333,10 +333,18 @@ async function isRunning(app: string): Promise<boolean> {
 
 // Music on the Mac itself. Checking with pgrep first matters: an AppleScript that names an app
 // that isn't installed won't even compile, and asking a closed player to "pause" would launch it.
-export async function macMedia(action: MacMedia, level: number): Promise<string> {
+export function newVolume(current: number, change: Change): number {
+  const step = { louder: 25, "a bit louder": 10, "a bit quieter": -10, quieter: -25, mute: -100, max: 100 }[change];
+  return Math.min(100, Math.max(0, Math.round(current + step)));
+}
+
+export async function macMedia(action: MacMedia, level: number, change?: Change): Promise<string> {
   if (action === "volume") {
-    await osascript(`set volume output volume ${Math.round(level)}`, []);
-    return `Mac volume ${Math.round(level)}`;
+    // The Mac can read its volume, so "a bit quieter" is relative to where it is now.
+    const current = change ? Number(await osascript("output volume of (get volume settings)", [])) : 0;
+    const target = change ? newVolume(Number.isFinite(current) ? current : 50, change) : level;
+    await osascript(`set volume output volume ${Math.round(target)}`, []);
+    return `Mac volume ${Math.round(target)}`;
   }
   const app = (await isRunning("Spotify")) ? "Spotify" : (await isRunning("Music")) ? "Music" : null;
   if (!app) throw new Error("Nothing is playing on the Mac: Spotify and Music are both closed.");

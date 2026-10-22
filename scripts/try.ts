@@ -25,7 +25,7 @@ const pretend: Hands = {
   saveFile: async (folder, name, content) => (show(`save ~/Alfred/${folder}/${name}: ${content}`), `~/Alfred/${folder}/${name}`),
   openApp: async (name) => show(`open ${name}`),
   addReminder: async (text, when) => show(`reminder: ${text}${when ? ` at ${when}` : ""}`),
-  macMedia: async (action, level) => (show(`Mac music: ${action}${action === "volume" ? ` ${level}` : ""}`), action),
+  macMedia: async (action, level, change) => (show(`Mac music: ${action}${action === "volume" ? ` ${change ?? level}` : ""}`), action),
 };
 
 const { chat } = configFromEnv({ ...process.env, ALFRED_KEY: process.env.ALFRED_KEY || "dry-run" });
