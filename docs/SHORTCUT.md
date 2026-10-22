@@ -1,7 +1,7 @@
 # Building the Alfred Shortcut on your iPhone
 
-About 20 minutes, once. You need the Worker deployed first (README, "Deploy"): its URL and your
-`ALFRED_KEY`.
+About 20 minutes, once. You need Alfred running on the Mac first ([`MAC_SETUP.md`](MAC_SETUP.md)):
+your Mac's Tailscale address and your `ALFRED_KEY`. Tailscale must be on on the iPhone.
 
 Shortcuts can't be imported from a file built outside a Mac (Apple requires them signed), so this
 is built by hand. Every action below is found with the search bar at the bottom of the Shortcuts
@@ -14,7 +14,7 @@ Shortcuts app → **+** → name it **Alfred**.
 1. **Dictate Text**. Tap the arrow: Language your language, Stop Listening **After Pause**.
 2. **Date** (it shows as "Current Date"; older iOS calls the action **Current Date**).
 3. **Format Date**: Date Format **ISO 8601**, Include ISO 8601 Time **on**.
-4. **Get Contents of URL**: URL `https://alfred.<your-subdomain>.workers.dev/command`
+4. **Get Contents of URL**: URL `https://<your-mac>.<tailnet>.ts.net/command` (from MAC_SETUP step 7)
    - Method **POST**
    - Headers: `Authorization` = `Bearer <your ALFRED_KEY>`
    - Request Body **JSON**:
@@ -70,7 +70,7 @@ You don't have to build every row today. Start with `next`, `previous`, `pause`,
 **Calculate** **Value ÷ 100** right before **Set Volume** / **Set Brightness** and use its result.
 
 Run it once from the Shortcuts app and say "pause". iOS asks for permission the first time it
-reaches the Worker, contacts, messages and so on: choose **Always Allow**.
+reaches the Mac, contacts, messages and so on: choose **Always Allow**.
 
 ## 3. Say "Hey Alfred" (no Siri)
 
@@ -101,8 +101,9 @@ Pick phrases that don't start with "Hey Alfred" so iOS doesn't confuse them with
 
 ## If something's off
 
-- **It says "my brain isn't answering":** the Worker's AI call failed (or the free daily
-  allowance ran out). `npx wrangler tail` on your computer shows the error live.
+- **It says "something went wrong on the Mac":** the reason is in `~/Alfred/alfred.log` on the Mac.
+- **"Could not connect to the server":** Tailscale is off on the phone, or Alfred isn't running on
+  the Mac.
 - **Nothing happens and nothing is said:** open the shortcut, tap ▶︎, and watch which action
   stops. Usually the URL, or the `Authorization` header is missing the word `Bearer `.
 - **Music pauses while you talk and stays paused after "skip":** dictation can take over the

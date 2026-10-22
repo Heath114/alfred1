@@ -1,80 +1,56 @@
 # Alfred
 
-Voice control for my iPhone. "Hey Alfred, skip this song" skips whatever is playing, in whatever
-app. Same for pause, volume, timers, alarms, reminders, texting and calling people, opening apps,
-directions, and quick questions.
+A private assistant that lives on my Mac mini and takes orders from my iPhone. "Hey Alfred, skip this
+song, then reply to my partner asking him to grab the keys, save his answer in a folder and send it
+to Lina on Telegram": it does all of it, and none of it leaves my own devices. The AI model runs on
+the Mac.
 
 ## How it works
 
 ```
-"Hey Alfred"  ──►  Shortcut "Alfred" listens  ──►  POST /command {"text": "skip this song"}
- (Vocal Shortcut)                                            │
-                                                             ▼
-                                                 Worker (this repo) asks an AI model,
-                                                 returns {"say": "", "steps": [{"do": "next", ...}]}
-                                                             │
-                     Shortcut runs each step  ◄──────────────┘
-                     (Skip Forward, Set Volume, Send Message...) and speaks "say"
+iPhone                                    Mac mini at home
+"Hey Alfred, …"  ─── Tailscale ───►  Alfred (this repo) ──► local AI model (Ollama / LM Studio)
+ (Shortcut:                           │  decides what to do, step by step, with its tools:
+  listens, sends                      │   Messages (read, send as me), Telegram (my account),
+  the words)                          │   files, Mac apps, phone actions
+      ◄── {"say": "...", "steps": [...]} ┘
+ runs phone steps (skip, volume, timer…) and speaks "say"
 ```
 
-iOS doesn't let any app listen for its own wake word or control other apps, but Shortcuts can:
-**Vocal Shortcuts** (iOS 18+) start a shortcut from a phrase you train, without Siri, and
-Shortcuts' media actions control whatever app is playing. This repo is the brain in the middle:
-a Cloudflare Worker that turns what you said into steps the Shortcut can run.
+- **Ears:** an iPhone Shortcut started by voice ("Hey Alfred" with Vocal Shortcuts, or Siri). It
+  dictates what you say and sends it to the Mac. [`docs/SHORTCUT.md`](docs/SHORTCUT.md)
+- **Brain:** a local model through Ollama (default `qwen3:8b`) or any OpenAI-style local server.
+  It works in rounds: call a tool, read the result, call the next one, then answer.
+- **Hands** (`src/tools.ts`):
+  - `phone`: skip/pause/play, volume, brightness, flashlight, Focus, timers, alarms, reminders, calls,
+    opening apps. These run on the iPhone, because iOS lets nothing else touch them.
+  - `messages_read`, `messages_send`: iMessage/SMS through the Mac's Messages app and its database.
+  - `telegram_read`, `telegram_send`: your own Telegram account, through Telegram's official API.
+  - `save_file`: files in `~/Alfred`.
+  - `open_mac_app`.
+- **Safety rails:** Alfred only sends to people you named in that command (directly or as "my
+  partner" etc., from `~/Alfred/people.json`), so a message it reads can't redirect it. Files stay
+  inside `~/Alfred`. Every command and tool call is logged to `~/Alfred/alfred.log`.
 
-- `src/brain.ts`: the prompt, the list of actions, and the model call (JSON schema output, so the
-  reply always has the shape the Shortcut expects).
-- `src/worker.ts`: the HTTP endpoint, protected by a shared key.
-- `docs/SHORTCUT.md`: building the Shortcut on the phone.
+## Set up
 
-The actions are fixed by what the Shortcut has blocks for: `next`, `previous`, `pause`, `play`,
-`volume`, `brightness`, `flashlight`, `focus`, `timer`, `alarm`, `reminder`, `message`, `call`,
-`open` (any app URL scheme or link). To add one: add it to `ACTIONS` and the prompt in
-`src/brain.ts`, and a block to the Shortcut.
+[`docs/MAC_SETUP.md`](docs/MAC_SETUP.md) for the Mac, then [`docs/SHORTCUT.md`](docs/SHORTCUT.md) for
+the iPhone.
 
-## Deploy (about 5 minutes)
-
-Needs Node 22+ and a free Cloudflare account. Nothing else: the thinking runs on Cloudflare
-Workers AI.
+## Develop
 
 ```sh
 npm install
-npx wrangler login
-npx wrangler secret put ALFRED_KEY            # paste a long random password; the Shortcut sends it
-npx wrangler deploy                           # prints https://alfred.<you>.workers.dev
-```
-
-Check it (PowerShell: use `curl.exe`):
-
-```sh
-curl -X POST https://alfred.<you>.workers.dev/command \
-  -H "Authorization: Bearer <ALFRED_KEY>" -d '{"text": "skip this song"}'
-# {"say":"","steps":[{"do":"next","value":0,"text":"","who":"","url":"","when":""}]}
-```
-
-Then build the Shortcut: [`docs/SHORTCUT.md`](docs/SHORTCUT.md).
-
-## Model
-
-By default, Cloudflare Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`), inside Cloudflare's
-free daily allowance at this volume. Pick another Workers AI model with `MODEL` under `[vars]` in
-`wrangler.toml`.
-
-Optional upgrade: `npx wrangler secret put ANTHROPIC_API_KEY` switches the thinking to Claude
-(`claude-opus-5-5` at low effort, or set `MODEL`), which handles messy dictation and multi-step
-commands better. Claude requests use server-side refusal fallbacks (`fallbacks: "default"`).
-
-## Developing
-
-```sh
-npm test                 # Worker + brain, with Workers AI and the Claude API stubbed
+npm test          # agent loop, tools, Messages database reading, server, with a scripted model
 npm run typecheck
-npx wrangler dev --remote   # local Worker using real Workers AI; put ALFRED_KEY in .dev.vars
-ANTHROPIC_API_KEY=... npm run try -- "skip this song" "text mom I'm 10 minutes late"   # Claude, prints timing
-npx wrangler tail        # live logs from the deployed Worker
+npm start         # needs macOS for the real hands
 ```
 
-## Later
+To add a hand: a tool in `src/tools.ts` (description + run), and its real implementation in
+`src/mac.ts` behind the `Hands` interface.
 
-- Mac: the same Worker, with a Mac client that can do far more (AppleScript, any app).
-- Remember things ("my gym playlist", who "the boss" is) in a small KV store the prompt reads.
+## Next
+
+- Spotify through its Web API, so music works when the phone isn't the one asking.
+- Notes, Reminders and Calendar on the Mac (they sync to the phone through iCloud).
+- Operating any Mac app by looking at the screen, as a fallback for things with no direct hand.

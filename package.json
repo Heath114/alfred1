@@ -1,24 +1,25 @@
 {
   "name": "alfred",
   "version": "1.0.0",
-  "description": "Alfred: voice control for the iPhone, through Shortcuts and Claude",
+  "description": "Alfred: a private voice assistant on your Mac mini, driven from your iPhone",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --experimental-strip-types src/server.ts",
+    "telegram-login": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --experimental-strip-types scripts/telegram-login.ts",
     "test": "node --disable-warning=ExperimentalWarning --experimental-strip-types --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "try": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --experimental-strip-types scripts/try.ts"
   },
   "license": "UNLICENSED",
-  "dependencies": {
-    "@anthropic-ai/sdk": "^1.0.0"
-  },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261021.1",
     "@types/node": "^26.6.5",
-    "typescript": "^7.0.2",
-    "wrangler": "^4.151.3"
+    "typescript": "^7.0.2"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "telegram": "^2.26.22"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
 }
