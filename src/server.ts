@@ -7,7 +7,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { runAgent } from "./agent.ts";
 import * as mac from "./mac.ts";
-import { everywhere, macNotification, ntfy, type Notify } from "./notify.ts";
+import { bark, everywhere, macNotification, type Notify } from "./notify.ts";
 import { modelAvailable, ollama, openaiCompatible, type Chat } from "./ollama.ts";
 import { clean, type Command, type Step } from "./steps.ts";
 import { SESSION_FILE, telegram } from "./telegram.ts";
@@ -39,7 +39,16 @@ export function configFromEnv(env = process.env): Config {
   // MODEL_URL points at an OpenAI-style local server (LM Studio etc.); without it, Ollama.
   const model = env.MODEL || (env.MODEL_URL ? "qwen3-8b" : "qwen3:8b");
   const channels: Notify[] = [];
-  if (env.NTFY_URL && env.NTFY_TOPIC) channels.push(ntfy(env.NTFY_URL, env.NTFY_TOPIC, env.NTFY_TOKEN));
+  if (env.BARK_DEVICE_KEY && env.BARK_ENCRYPTION_KEY) {
+    channels.push(
+      bark({
+        url: env.BARK_URL || "http://127.0.0.1:8080",
+        deviceKey: env.BARK_DEVICE_KEY,
+        key: env.BARK_ENCRYPTION_KEY,
+        password: env.BARK_PASSWORD,
+      }),
+    );
+  }
   if (env.MAC_NOTIFICATIONS !== "off" && platform() === "darwin") channels.push(macNotification());
   return {
     key: env.ALFRED_KEY,

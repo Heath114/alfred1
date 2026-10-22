@@ -7,7 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 import { runAgent } from "../src/agent.ts";
 import { findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, textFromAttributedBody } from "../src/mac.ts";
 import { modelAvailable, ollama, openaiCompatible, type ChatMessage, type Chat } from "../src/ollama.ts";
-import { everywhere, ntfy } from "../src/notify.ts";
+import { bark, encryptForBark, everywhere } from "../src/notify.ts";
+import { createDecipheriv } from "node:crypto";
 import { alfred, type Config } from "../src/server.ts";
 import { namedInCommand, noPlaceholders, realName, type Hands, type Turn } from "../src/tools.ts";
 
@@ -490,25 +491,37 @@ test("status reports what the running service can do; /notify sends a test", asy
   }
 });
 
-test("ntfy notifications: topic URL, title encoding, priority, token", async () => {
-  const sent: { url: string; headers: Headers; body: string }[] = [];
+test("Bark notifications are encrypted so only the phone can read them", async () => {
+  const sent: { url: string; headers: Headers; body: any }[] = [];
   globalThis.fetch = (async (url: string, init: RequestInit) => {
-    sent.push({ url, headers: new Headers(init.headers), body: String(init.body) });
-    return new Response("{}");
+    sent.push({ url, headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
+    return Response.json({ code: 200 });
   }) as typeof fetch;
-  await ntfy("http://127.0.0.1:2586/", "alfred-x1", "tk_abc")({ title: "Sam replied ✅", body: "Saved and sent.", urgent: true });
-  assert.equal(sent[0].url, "http://127.0.0.1:2586/alfred-x1");
-  assert.equal(sent[0].body, "Saved and sent.");
-  assert.equal(sent[0].headers.get("authorization"), "Bearer tk_abc");
-  assert.equal(sent[0].headers.get("priority"), "high");
-  assert.equal(sent[0].headers.get("title"), `=?UTF-8?B?${Buffer.from("Sam replied ✅").toString("base64")}?=`);
+  const key = "0123456789abcdef0123456789abcdef";
+  await bark({ url: "http://127.0.0.1:8080/", deviceKey: "dev123", key, password: "pw" })({ title: "Sam replied ✅", body: "Saved and sent.", urgent: true });
+
+  const { url, headers, body } = sent[0];
+  assert.equal(url, "http://127.0.0.1:8080/push");
+  assert.equal(headers.get("authorization"), `Basic ${Buffer.from("alfred:pw").toString("base64")}`);
+  assert.equal(body.device_key, "dev123");
+  assert.doesNotMatch(JSON.stringify(body), /Sam|Saved/); // nothing readable leaves the Mac
+  assert.equal(body.iv.length, 12);
+  // Decrypt the way the Bark app does: AES-256-GCM, tag at the end.
+  const raw = Buffer.from(body.ciphertext, "base64");
+  const decipher = createDecipheriv("aes-256-gcm", Buffer.from(key), Buffer.from(body.iv));
+  decipher.setAuthTag(raw.subarray(-16));
+  const plain = JSON.parse(Buffer.concat([decipher.update(raw.subarray(0, -16)), decipher.final()]).toString("utf8"));
+  assert.deepEqual(plain, { title: "Sam replied ✅", body: "Saved and sent.", group: "alfred", level: "timeSensitive" });
+
+  assert.notEqual(encryptForBark("x", key).iv, encryptForBark("x", key).iv); // fresh IV every time
+  assert.throws(() => bark({ url: "x", deviceKey: "d", key: "short" }), /exactly 32 characters/);
 
   const errors: object[] = [];
-  globalThis.fetch = (async () => new Response("forbidden", { status: 403 })) as typeof fetch;
+  globalThis.fetch = (async () => new Response("device not found", { status: 400 })) as typeof fetch;
   let other = 0;
-  await everywhere([ntfy("http://x", "t"), async () => void other++], (e) => errors.push(e))({ body: "hi" });
+  await everywhere([bark({ url: "http://x", deviceKey: "d", key }), async () => void other++], (e) => errors.push(e))({ body: "hi" });
   assert.equal(other, 1);
-  assert.match(JSON.stringify(errors), /ntfy 403: forbidden/);
+  assert.match(JSON.stringify(errors), /bark 400: device not found/);
 });
 
 test("model check names the fix", async () => {
