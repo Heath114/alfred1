@@ -93,15 +93,88 @@ async function contactsFromDbs(dbs: string[], name: string): Promise<Contact[]> 
   return [...byKey.values()].slice(0, 10);
 }
 
-const SEND = `on run {target, body}
-  tell application "Messages"
-    set svc to 1st account whose service type = iMessage
-    send body to participant target of svc
-  end tell
+// The send script other Messages projects settled on: a participant of the account works for
+// people you've never messaged (a chat id doesn't), and errors come back as text saying whether
+// the recipient lookup or the send itself failed.
+const SEND = `on run argv
+  set {h, t, svc} to {item 1 of argv, item 2 of argv, item 3 of argv}
+  set phase to "lookup"
+  try
+    tell application "Messages"
+      with timeout of 30 seconds
+        if svc is "SMS" then
+          set acct to first account whose service type = SMS
+        else
+          set acct to first account whose service type = iMessage
+        end if
+        set p to participant h of acct
+        set phase to "dispatch"
+        send t to p
+      end timeout
+    end tell
+    return "ok"
+  on error m number n
+    return "err" & tab & phase & tab & n & tab & m
+  end try
 end run`;
 
-export async function sendMessage(handle: string, text: string): Promise<void> {
-  await osascript(SEND, [handle, text]);
+export interface SendOptions {
+  runScript?: (args: string[]) => Promise<string>;
+  dbPath?: string;
+  confirmWithinMs?: number;
+}
+
+// Messages can say "sent" and then not send (or write an empty row), so a send only counts once
+// the message shows up in the Messages database without an error. iMessage first; SMS (through the
+// iPhone's Text Message Forwarding) when the person isn't on iMessage or iMessage fails.
+export async function sendMessage(handle: string, text: string, opts: SendOptions = {}): Promise<void> {
+  const runScript = opts.runScript ?? ((args) => osascript(SEND, args));
+  let lastProblem = "";
+  for (const service of ["iMessage", "SMS"]) {
+    const before = await latestMessageId(opts.dbPath).catch(() => null);
+    const out = await runScript([handle, text, service]);
+    if (out.startsWith("err")) {
+      const [, phase, code, ...rest] = out.split("\t");
+      lastProblem = `${service} ${phase} failed (${code}${rest.length ? `: ${rest.join(" ")}` : ""})`;
+      if (code === "-1743") throw new Error("macOS blocked Alfred from controlling Messages. Run: alfred doctor");
+      if (phase === "lookup") continue; // not on this service: nothing was sent, try the next
+      throw new Error(`Messages couldn't send: ${lastProblem}`);
+    }
+    if (before === null) return; // can't read the database to confirm; trust Messages
+    const row = await sentRow(handle, before, opts.dbPath, opts.confirmWithinMs ?? 10_000);
+    if (row === "sent") return;
+    if (row === "failed") {
+      lastProblem = `${service} delivery failed`;
+      continue;
+    }
+    throw new Error("Messages said it sent, but the message never appeared in Messages. Check the Messages app on the Mac.");
+  }
+  throw new Error(`Couldn't send to ${handle}: ${lastProblem}.`);
+}
+
+// Watch for the outgoing row: "sent" (has text, no error), "failed" (error set), or "missing".
+async function sentRow(handle: string, afterId: number, dbPath = chatDb(), withinMs: number): Promise<"sent" | "failed" | "missing"> {
+  const until = Date.now() + withinMs;
+  do {
+    const db = await openDb(dbPath);
+    try {
+      const ids = handleIds(db, [handle]);
+      const rows = ids.length
+        ? (db
+            .prepare(
+              `SELECT error, text, attributedBody FROM message
+               WHERE ROWID > ? AND is_from_me = 1 AND handle_id IN (${ids.map(() => "?").join(",")})`,
+            )
+            .all(afterId, ...ids) as { error: number | null; text: string | null; attributedBody: Uint8Array | null }[])
+        : [];
+      if (rows.some((r) => r.error)) return "failed";
+      if (rows.some((r) => r.text || textFromAttributedBody(r.attributedBody))) return "sent";
+    } finally {
+      db.close();
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  } while (Date.now() < until);
+  return "missing";
 }
 
 // Phone numbers are stored differently in Contacts ("079 123 4567") and Messages ("+962791234567"),
@@ -114,21 +187,24 @@ export function sameHandle(a: string, b: string): boolean {
 }
 
 // Newer macOS keeps the text of most messages only inside attributedBody (an archived
-// NSAttributedString). The string follows the "NSString" class name, length-prefixed.
+// NSAttributedString). After the "NSString" class name comes the marker 01 2B, then the length
+// (one byte, or 0x81 + 16-bit, or 0x82 + 32-bit, little-endian), then the UTF-8 text.
 export function textFromAttributedBody(blob: Uint8Array | null): string {
   if (!blob) return "";
   const buf = Buffer.from(blob);
   const at = buf.indexOf("NSString");
   if (at < 0) return "";
-  let p = at + "NSString".length + 5;
+  const marker = buf.indexOf(Buffer.from([0x01, 0x2b]), at + 8);
+  if (marker < 0 || marker > at + 8 + 16) return "";
+  let p = marker + 2;
   let length = buf[p];
   p += 1;
   if (length === 0x81) {
     length = buf.readUInt16LE(p);
     p += 2;
   } else if (length === 0x82) {
-    length = buf.readUIntLE(p, 3);
-    p += 3;
+    length = buf.readUInt32LE(p);
+    p += 4;
   }
   return buf.subarray(p, p + length).toString("utf8");
 }
@@ -138,8 +214,7 @@ const APPLE_EPOCH = 978307200; // 2001-01-01 in Unix seconds
 export async function readMessages(handles: string[], count: number, dbPath = chatDb()): Promise<Message[]> {
   const db = await openDb(dbPath);
   try {
-    const rows = db.prepare("SELECT ROWID AS id, id AS handle FROM handle").all() as { id: number; handle: string }[];
-    const ids = rows.filter((r) => handles.some((h) => sameHandle(h, r.handle))).map((r) => r.id);
+    const ids = handleIds(db, handles);
     if (!ids.length) return [];
     const messages = db
       .prepare(
@@ -165,7 +240,15 @@ const chatDb = () => join(homedir(), "Library/Messages/chat.db");
 
 async function openDb(dbPath: string) {
   const { DatabaseSync } = await import("node:sqlite");
-  return new DatabaseSync(dbPath, { readOnly: true });
+  // Read-only, and wait briefly if Messages is writing. Never immutable=1: it misses recent writes.
+  return new DatabaseSync(dbPath, { readOnly: true, timeout: 2000 });
+}
+
+type Db = Awaited<ReturnType<typeof openDb>>;
+
+function handleIds(db: Db, handles: string[]): number[] {
+  const rows = db.prepare("SELECT ROWID AS id, id AS handle FROM handle").all() as { id: number; handle: string }[];
+  return rows.filter((r) => handles.some((h) => sameHandle(h, r.handle))).map((r) => r.id);
 }
 
 export async function latestMessageId(dbPath = chatDb()): Promise<number> {
@@ -177,20 +260,22 @@ export async function latestMessageId(dbPath = chatDb()): Promise<number> {
   }
 }
 
-// Messages from these handles (not from me) newer than afterId, oldest first.
-export async function repliesAfter(handles: string[], afterId: number, dbPath = chatDb()): Promise<(Message & { id: number })[]> {
+// Messages from these handles (not from me) newer than afterId, oldest first. `since` also drops
+// old messages that an iCloud resync re-inserts with new row ids.
+export async function repliesAfter(handles: string[], afterId: number, since?: string, dbPath = chatDb()): Promise<(Message & { id: number })[]> {
   const db = await openDb(dbPath);
   try {
-    const rows = db.prepare("SELECT ROWID AS id, id AS handle FROM handle").all() as { id: number; handle: string }[];
-    const ids = rows.filter((r) => handles.some((h) => sameHandle(h, r.handle))).map((r) => r.id);
+    const ids = handleIds(db, handles);
     if (!ids.length) return [];
-    const found = db
+    const sinceSecs = since ? Date.parse(since) / 1000 - APPLE_EPOCH - 120 : -Infinity;
+    const found = (db
       .prepare(
         `SELECT ROWID AS id, CASE WHEN date > 1000000000000 THEN date / 1000000000 ELSE date END AS secs, text, attributedBody
          FROM message WHERE handle_id IN (${ids.map(() => "?").join(",")}) AND is_from_me = 0
            AND associated_message_type = 0 AND ROWID > ? ORDER BY ROWID`,
       )
-      .all(...ids, afterId) as { id: number; secs: number; text: string | null; attributedBody: Uint8Array | null }[];
+      .all(...ids, afterId) as { id: number; secs: number; text: string | null; attributedBody: Uint8Array | null }[])
+      .filter((m) => m.secs >= sinceSecs);
     return found.map((m) => ({
       id: m.id,
       from: "them",
@@ -211,7 +296,7 @@ export function insideFolder(root: string, folder: string, name: string): string
 }
 
 export async function saveFile(root: string, folder: string, name: string, content: string): Promise<string> {
-  const path = insideFolder(root, folder, name);
+  const path = insideFolder(root, folder, /\.[a-z0-9]{1,5}$/i.test(name) ? name : `${name}.txt`);
   await mkdir(resolve(path, ".."), { recursive: true });
   await writeFile(path, content.endsWith("\n") ? content : content + "\n");
   return path;

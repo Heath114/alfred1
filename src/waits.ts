@@ -11,6 +11,7 @@ export function waits(
   hands: Hands,
   on: { onReply(w: Waiting, reply: string): Promise<void>; onGiveUp(w: Waiting): Promise<void> },
   log: (e: object) => void,
+  settleMs = 800, // Messages fills in a new row a moment after inserting it
 ) {
   const file = join(folder, "waiting.json");
   let list: Waiting[] = [];
@@ -42,7 +43,11 @@ export function waits(
       try {
         await load();
         for (const w of [...list]) {
-          const replies = await hands.repliesAfter(w.handles, w.afterId);
+          let replies = await hands.repliesAfter(w.handles, w.afterId, w.since);
+          if (replies.length && settleMs) {
+            await new Promise((r) => setTimeout(r, settleMs));
+            replies = await hands.repliesAfter(w.handles, w.afterId, w.since);
+          }
           const expired = !replies.length && now - Date.parse(w.since) > DAY;
           if (!replies.length && !expired) continue;
           list = list.filter((x) => x !== w);

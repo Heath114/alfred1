@@ -23,6 +23,7 @@ export type Action = (typeof ACTIONS)[number];
 export interface Step {
   do: Action;
   value: number;
+  level: number; // value as 0-1, for the Shortcut's Set Volume / Set Brightness
   text: string;
   who: string;
   url: string;
@@ -66,6 +67,7 @@ export function clean(raw: Reply): Reply {
       return {
         do: s.do,
         value,
+        level: s.do === "volume" || s.do === "brightness" ? value / 100 : 0,
         text: s.text ?? "",
         who: s.who ?? "",
         url,

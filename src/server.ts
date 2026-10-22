@@ -67,7 +67,7 @@ export function configFromEnv(env = process.env): Config {
       findContacts: mac.findContacts,
       readMessages: (handles, count) => mac.readMessages(handles, count),
       latestMessageId: () => mac.latestMessageId(),
-      repliesAfter: (handles, afterId) => mac.repliesAfter(handles, afterId),
+      repliesAfter: (handles, afterId, since) => mac.repliesAfter(handles, afterId, since),
       sendMessage: mac.sendMessage,
       telegramRead: tgApi ? tgApi.read : noTelegram,
       telegramSend: tgApi ? tgApi.send : noTelegram,

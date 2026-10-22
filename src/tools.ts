@@ -19,7 +19,7 @@ export interface Hands {
   findContacts(name: string): Promise<Contact[]>;
   readMessages(handles: string[], count: number): Promise<Message[]>;
   latestMessageId(): Promise<number>;
-  repliesAfter(handles: string[], afterId: number): Promise<(Message & { id: number })[]>;
+  repliesAfter(handles: string[], afterId: number, since?: string): Promise<(Message & { id: number })[]>;
   sendMessage(handle: string, text: string): Promise<void>;
   telegramRead(chat: string, count: number): Promise<{ chat: string; messages: Message[] }>;
   telegramSend(chat: string, text: string): Promise<{ chat: string }>;
@@ -76,6 +76,17 @@ function tool(
 
 export const toolsFor = (device: Device) => TOOLS.filter((t) => !t.only || t.only === device);
 
+const step = (action: Step["do"], fields: Partial<Step>): Step => ({
+  do: action,
+  value: 0,
+  level: 0,
+  text: "",
+  who: "",
+  url: "",
+  when: "",
+  ...fields,
+});
+
 // "partner" -> the real name from people.json; anything else unchanged.
 export function realName(who: string, turn: Turn): string {
   const key = who.toLowerCase().replace(/^(my|the)\s+/, "");
@@ -126,7 +137,7 @@ volume, brightness: value 0-100. Relative requests: up 75, a bit up 60, down 30,
 flashlight, focus (Do Not Disturb): text "on" or "off".
 timer: value in seconds. alarm: text "HH:MM" 24h.
 reminder: text what, when "YYYY-MM-DD HH:MM" or "".
-call: who is the contact name.
+call: who is the contact name (Alfred looks up the number).
 open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, whatsapp:, https://...).`,
     {
       action: { type: "string", enum: ACTIONS.filter((a) => a !== "message") },
@@ -142,21 +153,23 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
       if (!(ACTIONS as readonly string[]).includes(action) || action === "message") {
         throw new Error(`Unknown phone action "${action}". To text someone use messages_send.`);
       }
-      turn.steps.push({
-        do: action as Step["do"],
-        value: num(a.value, 0),
-        text: str(a.text),
-        who: str(a.who) && realName(str(a.who), turn),
-        url: str(a.url),
-        when: str(a.when),
-      });
+      if (action === "call") {
+        // Look the number up here, so the phone only has to open a tel: link.
+        const c = await contactFor(str(a.who), turn);
+        if (!c.phones.length) throw new Error(`${c.name} has no phone number.`);
+        turn.steps.push(step("open", { url: `tel:${c.phones[0].replace(/[^\d+]/g, "")}` }));
+        return { calling: c.name };
+      }
+      turn.steps.push(
+        step(action as Step["do"], { value: num(a.value, 0), text: str(a.text), url: str(a.url), when: str(a.when) }),
+      );
       return { queued: action };
     },
     "phone",
   ),
   tool(
     "mac_media",
-    "Control music on the Mac (Spotify or Music, whichever is open) and the Mac's volume (value 0-100).",
+    "Control music on the Mac (Spotify or Music, whichever is open) and the Mac's volume: value 0-100; relative requests: up 75, a bit up 60, down 30, a bit down 40, mute 0.",
     { action: { type: "string", enum: ["next", "previous", "pause", "play", "volume"] }, value: { type: "number" } },
     ["action"],
     async (a, turn) => {

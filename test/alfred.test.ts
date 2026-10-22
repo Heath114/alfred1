@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { runAgent } from "../src/agent.ts";
-import { findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, textFromAttributedBody } from "../src/mac.ts";
+import { findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, sendMessage, textFromAttributedBody } from "../src/mac.ts";
 import { modelAvailable, ollama, openaiCompatible, type ChatMessage, type Chat } from "../src/ollama.ts";
 import { bark, encryptForBark, everywhere } from "../src/notify.ts";
 import { createDecipheriv } from "node:crypto";
@@ -137,9 +137,17 @@ test("bad tool calls don't crash the turn; too many rounds stops", async () => {
     say("<think>hmm</think>  Louder."),
   );
   const out = await runAgent({ text: "louder" }, { chat: weird.chat, hands });
-  assert.deepEqual(out.steps.map((s) => [s.do, s.value]), [["volume", 100]]);
+  assert.deepEqual(out.steps.map((s) => [s.do, s.value, s.level]), [["volume", 100, 1]]);
   assert.match(weird.seen[2].at(-1)!.content, /To text someone use messages_send/);
   assert.equal(out.say, "Louder.");
+});
+
+test("calls are looked up on the Mac and become a tel: link for the phone", async () => {
+  const { hands } = fakeHands();
+  const { chat, seen } = scripted(call("phone", { action: "call", who: "my partner" }), call("phone", { action: "call", who: "Omar" }), say("Calling Sam."));
+  const reply = await runAgent({ text: "call my partner" }, { chat, hands, people: { partner: "Sam Haddad" } });
+  assert.deepEqual(reply.steps.map((s) => [s.do, s.url]), [["open", "tel:+962791112222"]]);
+  assert.match(seen[2].at(-1)!.content, /No contact named \\"Omar\\"/);
 });
 
 test("empty command needs no model", async () => {
@@ -348,6 +356,10 @@ test("message text is recovered from attributedBody", () => {
   assert.equal(textFromAttributedBody(attributed("On my way 🚗")), "On my way 🚗");
   const long = "x".repeat(300);
   assert.equal(textFromAttributedBody(attributed(long)), long);
+  const huge = "y".repeat(70000); // 0x82: 32-bit length
+  const blob = Buffer.concat([Buffer.from("\x84\x08NSString\x01\x94\x84\x01+\x82", "latin1"), Buffer.alloc(4), Buffer.from(huge)]);
+  blob.writeUInt32LE(huge.length, blob.indexOf("+\x82", 0, "latin1") + 2);
+  assert.equal(textFromAttributedBody(blob), huge);
   assert.equal(textFromAttributedBody(null), "");
   assert.equal(textFromAttributedBody(Buffer.from("nothing here")), "");
 });
@@ -375,8 +387,14 @@ test("reads a conversation from a Messages database", async () => {
   assert.equal((await readMessages(["079 111 2222"], 1, path))[0].text, "Sure, on my way home at 6");
   assert.deepEqual(await readMessages(["0700000000"], 5, path), []);
   assert.equal(await latestMessageId(path), 4);
-  assert.deepEqual((await repliesAfter(["0791112222"], 1, path)).map((m) => [m.id, m.text]), [[2, "Sure, on my way home at 6"]]);
-  assert.deepEqual(await repliesAfter(["0791112222"], 2, path), []);
+  assert.deepEqual((await repliesAfter(["0791112222"], 1, undefined, path)).map((m) => [m.id, m.text]), [[2, "Sure, on my way home at 6"]]);
+  assert.deepEqual(await repliesAfter(["0791112222"], 2, undefined, path), []);
+  // An old message re-inserted by an iCloud resync (new row id, old date) isn't a reply.
+  const again = new DatabaseSync(path);
+  again.prepare("INSERT INTO message (handle_id, is_from_me, date, text, attributedBody, associated_message_type) VALUES (1, 0, ?, 'from last year', NULL, 0)").run(ns("2025-10-01T09:00:00Z"));
+  again.close();
+  assert.deepEqual((await repliesAfter(["0791112222"], 4, "2026-10-22T09:00:00Z", path)).map((m) => m.text), []);
+  assert.deepEqual((await repliesAfter(["0791112222"], 4, undefined, path)).map((m) => m.text), ["from last year"]);
 });
 
 test("finds contacts in the AddressBook databases, merged across accounts", async () => {
@@ -406,6 +424,74 @@ test("finds contacts in the AddressBook databases, merged across accounts", asyn
   assert.deepEqual(await findContacts("nobody", root), []);
 });
 
+// A stand-in for the Messages app: records the send and writes the row Messages would write.
+async function fakeMessagesDb() {
+  const dir = await mkdtemp(join(tmpdir(), "msg-"));
+  const path = join(dir, "chat.db");
+  const db = new DatabaseSync(path);
+  db.exec(`CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+    CREATE TABLE message (ROWID INTEGER PRIMARY KEY, handle_id INTEGER, is_from_me INTEGER, date INTEGER, text TEXT,
+      attributedBody BLOB, associated_message_type INTEGER DEFAULT 0, error INTEGER DEFAULT 0);`);
+  db.prepare("INSERT INTO handle VALUES (1, '+962791112222')").run();
+  db.prepare("INSERT INTO message (handle_id, is_from_me, date, text) VALUES (1, 0, 1, 'old')").run();
+  db.close();
+  const write = (row: { text?: string | null; error?: number }) => {
+    const d = new DatabaseSync(path);
+    d.prepare("INSERT INTO message (handle_id, is_from_me, date, text, error) VALUES (1, 1, 2, ?, ?)").run(row.text ?? null, row.error ?? 0);
+    d.close();
+  };
+  return { path, write };
+}
+
+test("sending counts only once the message appears in Messages; SMS is the fallback", async () => {
+  const fast = { confirmWithinMs: 300 };
+  // Normal iMessage send.
+  let db = await fakeMessagesDb();
+  let calls: string[][] = [];
+  await sendMessage("079 111 2222", "hi", { ...fast, dbPath: db.path, runScript: async (a) => (calls.push(a), db.write({ text: a[1] }), "ok") });
+  assert.deepEqual(calls, [["079 111 2222", "hi", "iMessage"]]);
+
+  // Not on iMessage: the lookup fails, nothing was sent, SMS goes out.
+  db = await fakeMessagesDb();
+  calls = [];
+  await sendMessage("0791112222", "hi", {
+    ...fast,
+    dbPath: db.path,
+    runScript: async (a) => (calls.push(a), a[2] === "iMessage" ? "err\tlookup\t-1728\tCan't get participant" : (db.write({ text: a[1] }), "ok")),
+  });
+  assert.deepEqual(calls.map((a) => a[2]), ["iMessage", "SMS"]);
+
+  // iMessage row has an error: retried as SMS.
+  db = await fakeMessagesDb();
+  calls = [];
+  await sendMessage("0791112222", "hi", {
+    ...fast,
+    dbPath: db.path,
+    runScript: async (a) => (calls.push(a), db.write(a[2] === "iMessage" ? { text: a[1], error: 22 } : { text: a[1] }), "ok"),
+  });
+  assert.deepEqual(calls.map((a) => a[2]), ["iMessage", "SMS"]);
+
+  // "ok" but only an empty ghost row: not sent.
+  db = await fakeMessagesDb();
+  await assert.rejects(
+    sendMessage("0791112222", "hi", { ...fast, dbPath: db.path, runScript: async () => (db.write({ text: null }), "ok") }),
+    /never appeared in Messages/,
+  );
+
+  // A dispatch error isn't retried (it may have gone out), and a blocked permission says how to fix it.
+  db = await fakeMessagesDb();
+  calls = [];
+  await assert.rejects(
+    sendMessage("0791112222", "hi", { ...fast, dbPath: db.path, runScript: async (a) => (calls.push(a), "err\tdispatch\t-1708\tsomething") }),
+    /Messages couldn't send: iMessage dispatch failed/,
+  );
+  assert.equal(calls.length, 1);
+  await assert.rejects(
+    sendMessage("0791112222", "hi", { ...fast, dbPath: db.path, runScript: async () => "err\tlookup\t-1743\tNot authorized" }),
+    /blocked Alfred from controlling Messages/,
+  );
+});
+
 test("files stay inside the Alfred folder", async () => {
   const root = await mkdtemp(join(tmpdir(), "alfred-"));
   assert.equal(insideFolder(root, "partner", "reply.txt"), join(root, "partner", "reply.txt"));
@@ -414,6 +500,7 @@ test("files stay inside the Alfred folder", async () => {
   assert.throws(() => insideFolder(root, "x", ""), /inside the Alfred folder/);
   const saved = await saveFile(root, "partner", "reply.txt", "Sure");
   assert.equal(await readFile(saved, "utf8"), "Sure\n");
+  assert.equal(await saveFile(root, "", "wifi", "pw"), join(root, "wifi.txt"));
 });
 
 const realFetch = globalThis.fetch;
@@ -586,7 +673,7 @@ test("server: auth, bad input, and a full command", async () => {
     assert.equal((await post('{"text":"skip"}', "wrong")).status, 401);
     assert.equal((await post("not json")).status, 400);
     const res = await post('{"text":"skip this song"}');
-    assert.deepEqual(await res.json(), { say: "", steps: [{ do: "next", value: 0, text: "", who: "", url: "", when: "" }] });
+    assert.deepEqual(await res.json(), { say: "", steps: [{ do: "next", value: 0, level: 0, text: "", who: "", url: "", when: "" }] });
     const log = await readFile(join(folder, "alfred.log"), "utf8");
     assert.match(log, /"command":"skip this song"/);
     assert.match(log, /"tool":"phone"/);
