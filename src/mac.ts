@@ -358,3 +358,20 @@ export function reminderArgs(text: string, when: string): string[] {
 export async function addReminder(text: string, when: string): Promise<void> {
   await osascript(ADD_REMINDER, reminderArgs(text, when));
 }
+
+// Setup asks the running service to do one harmless thing with Messages and Reminders, so macOS
+// shows its "Alfred wants to control..." prompt for the right program while the owner is watching.
+const PROBES = {
+  messages: `tell application id "com.apple.MobileSMS" to count accounts`,
+  reminders: `tell application id "com.apple.reminders" to count lists`,
+};
+
+export async function probeAutomation(app: keyof typeof PROBES): Promise<void> {
+  try {
+    await run("osascript", ["-e", "with timeout of 300 seconds", "-e", PROBES[app], "-e", "end timeout"], { timeout: 310_000 });
+  } catch (err) {
+    const text = String((err as { stderr?: string }).stderr || err);
+    if (/-1743|not allowed|Not authori[sz]ed/i.test(text)) throw new Error("not allowed");
+    throw new Error(text.trim().slice(0, 200));
+  }
+}

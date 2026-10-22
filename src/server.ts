@@ -31,6 +31,7 @@ export interface Config {
   replyWithinMs: number;
   checkModel?: () => Promise<void>;
   telegramReady?: () => boolean;
+  probe?: (app: "messages" | "reminders") => Promise<void>;
   // When set, requests that come through Tailscale must be from this login (Tailscale Serve adds
   // the Tailscale-User-Login header and strips forged ones). Local requests have no header.
   tailscaleUser?: string;
@@ -88,6 +89,7 @@ export function configFromEnv(env = process.env): Config {
     replyWithinMs: (Number(env.REPLY_WITHIN_SECONDS) || 20) * 1000,
     tailscaleUser: env.TAILSCALE_USER,
     telegramReady: () => tgConfigured && existsSync(SESSION_FILE),
+    probe: mac.probeAutomation,
   };
 }
 
@@ -213,7 +215,7 @@ export function alfred(config: Config) {
     };
     if (req.method === "GET" && req.url === "/") return send(200, { ok: true, name: "alfred" });
     const route = `${req.method} ${req.url}`;
-    if (!["POST /command", "GET /status", "POST /notify"].includes(route)) return send(404, { error: "not found" });
+    if (!["POST /command", "GET /status", "POST /notify", "POST /probe"].includes(route)) return send(404, { error: "not found" });
     if (req.headers.authorization !== `Bearer ${config.key}`) return send(401, { error: "unauthorized" });
     const viaTailscale = req.headers["tailscale-user-login"];
     if (config.tailscaleUser && viaTailscale !== undefined && viaTailscale !== config.tailscaleUser) {
@@ -229,6 +231,16 @@ export function alfred(config: Config) {
       if (typeof body?.text !== "string") throw new Error();
     } catch {
       return send(400, { error: 'send JSON like {"text": "skip this song"}' });
+    }
+    if (route === "POST /probe") {
+      // Used by setup to bring up macOS's permission prompts for the service itself.
+      const app = body.text === "reminders" ? "reminders" : "messages";
+      try {
+        await config.probe?.(app);
+        return send(200, { ok: true });
+      } catch (err) {
+        return send(200, { ok: false, error: message(err) });
+      }
     }
     if (route === "POST /notify") {
       // Used by setup to send a test notification.

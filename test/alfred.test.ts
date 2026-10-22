@@ -9,7 +9,9 @@ import { reminderArgs, findContacts, insideFolder, latestMessageId, readMessages
 import { modelAvailable, ollama, openaiCompatible, type ChatMessage, type Chat } from "../src/ollama.ts";
 import { bark, encryptForBark, everywhere } from "../src/notify.ts";
 import { createDecipheriv } from "node:crypto";
-import { alfredShortcut, toPlist } from "../src/shortcut.ts";
+import { alfredShortcut } from "../src/shortcut.ts";
+import { toPlist } from "../src/plist.ts";
+import { alfredAgent, appInfoPlist, barkAgent, watchdogAgent } from "../src/install.ts";
 import { ACTIONS } from "../src/steps.ts";
 import { alfred, type Config } from "../src/server.ts";
 import { namedInCommand, noPlaceholders, realName, type Hands, type Turn } from "../src/tools.ts";
@@ -801,4 +803,38 @@ test("the plist is valid XML that round-trips", async (t) => {
   if (py.error) return t.skip("python3 not available");
   assert.equal(py.status, 0, String(py.stderr));
   assert.deepEqual(JSON.parse(String(py.stdout)), JSON.parse(JSON.stringify(sc)));
+});
+
+test("Alfred.app and the LaunchAgents are valid plists with absolute paths", async (t) => {
+  const { spawnSync } = await import("node:child_process");
+  const parse = (xml: string) => {
+    const py = spawnSync("python3", ["-c", "import plistlib,json,sys; print(json.dumps(plistlib.loads(sys.stdin.buffer.read())))"], { input: xml });
+    if (py.error) return null;
+    assert.equal(py.status, 0, String(py.stderr));
+    return JSON.parse(String(py.stdout));
+  };
+  const info = parse(appInfoPlist());
+  if (!info) return t.skip("python3 not available");
+  assert.equal(info.CFBundleExecutable, "Alfred");
+  assert.equal(info.LSUIElement, true);
+  assert.match(info.NSAppleEventsUsageDescription, /messages/);
+
+  const agent = parse(alfredAgent({ node: "/Users/me/.alfred/runtime/node/bin/node", appDir: "/Users/me/.alfred/app", uid: 501 }));
+  assert.match(agent.ProgramArguments[0], /Alfred\.app\/Contents\/MacOS\/Alfred$/);
+  assert.deepEqual(agent.ProgramArguments.slice(1), [
+    "/Users/me/.alfred/runtime/node/bin/node",
+    "--disable-warning=ExperimentalWarning",
+    "--env-file=/Users/me/.alfred/app/.env",
+    "/Users/me/.alfred/app/src/server.ts",
+  ]);
+  for (const p of [...agent.ProgramArguments, agent.WorkingDirectory, agent.StandardOutPath]) {
+    if (!p.startsWith("--")) assert.ok(p.startsWith("/"), `${p} is absolute (launchd doesn't expand ~)`);
+  }
+  assert.equal(agent.KeepAlive, true);
+  assert.equal(agent.LimitLoadToSessionType, "Aqua");
+
+  assert.deepEqual(parse(barkAgent({ server: "/x/bark-server", dataDir: "/x/data" })).ProgramArguments, ["/x/bark-server", "--addr", "127.0.0.1:8080", "--data", "/x/data"]);
+  const dog = parse(watchdogAgent(501));
+  assert.deepEqual(dog.ProgramArguments, ["/bin/launchctl", "kickstart", "gui/501/com.alfred.agent"]);
+  assert.equal(dog.StartInterval, 300);
 });
