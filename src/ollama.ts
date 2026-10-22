@@ -18,30 +18,36 @@ export interface ToolSpec {
 
 export type Chat = (messages: ChatMessage[], tools: ToolSpec[]) => Promise<ChatMessage>;
 
-// Ollama's default context window is small (2048-4096 tokens depending on version) and it silently
-// drops the start of anything longer: the instructions and tool list go first, and the model then
-// behaves as if it never had them. Alfred's prompt + tools + a few rounds need about 4-6k.
-const CONTEXT = 12288;
+// Ollama's default context window is 4096 tokens on a 16 GB Mac, and it silently drops the start of
+// anything longer: the conversation so far goes first, and the model then acts as if it never saw
+// it. Alfred's prompt + tools + a few rounds need about 4-6k. The same options on every request
+// also matter: changing them makes Ollama reload the model.
+const CONTEXT = 16384;
 
 export function ollama(model: string, host = "http://127.0.0.1:11434", contextLength = CONTEXT): Chat {
   return async (messages, tools) => {
-    const res = await fetch(`${host}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model,
-        messages,
-        tools,
-        stream: false,
-        think: false, // reasoning models are much slower with it on; commands are short
-        keep_alive: "60m", // stay loaded between commands
-        options: { temperature: 0, num_ctx: contextLength },
-      }),
-    });
-    if (!res.ok) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 300)}`);
-    const data = (await res.json()) as { message?: ChatMessage };
-    if (!data.message) throw new Error("Ollama returned no message");
-    return data.message;
+    // One retry: Ollama answers HTTP 500 when a small model writes a malformed tool call, and after a
+    // GPU reset it can return an empty message until the model is reloaded.
+    for (let attempt = 1; ; attempt++) {
+      const res = await fetch(`${host}/api/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          messages,
+          tools,
+          stream: false,
+          think: false, // thinking + tools can come back empty, and it's much slower; commands are short
+          keep_alive: attempt === 1 ? -1 : 0, // stay loaded; on the retry, unload so it reloads clean
+          options: { temperature: 0, num_ctx: contextLength },
+        }),
+      });
+      const failed = !res.ok ? `Ollama ${res.status}: ${(await res.text()).slice(0, 300)}` : null;
+      const data = failed ? null : ((await res.json()) as { message?: ChatMessage });
+      const message = data?.message;
+      if (message && (message.content?.trim() || message.tool_calls?.length)) return message;
+      if (attempt === 2 || (failed && res.status < 500)) throw new Error(failed ?? "Ollama returned an empty answer twice.");
+    }
   };
 }
 

@@ -430,10 +430,23 @@ test("Ollama client sends tools with thinking off and returns the message", asyn
   assert.equal(body.model, "qwen3:8b");
   assert.equal(body.think, false);
   assert.equal(body.stream, false);
-  assert.equal(body.options.num_ctx, 12288);
+  assert.equal(body.options.num_ctx, 16384);
+  assert.equal(body.keep_alive, -1);
 
-  globalThis.fetch = (async () => new Response("model not found", { status: 404 })) as typeof fetch;
+  // A 500 (malformed tool call) or an empty answer (GPU reset) gets one retry, with a reload.
+  const bodies: any[] = [];
+  const answers = [new Response("error parsing tool call", { status: 500 }), Response.json({ message: { role: "assistant", content: "ok" } })];
+  globalThis.fetch = (async (_url: string, init: RequestInit) => (bodies.push(JSON.parse(String(init.body))), answers.shift()!)) as typeof fetch;
+  assert.equal((await ollama("m")([], [])).content, "ok");
+  assert.deepEqual(bodies.map((b) => b.keep_alive), [-1, 0]);
+
+  globalThis.fetch = (async () => Response.json({ message: { role: "assistant", content: " " } })) as typeof fetch;
+  await assert.rejects(ollama("m")([], []), /empty answer twice/);
+
+  let calls = 0;
+  globalThis.fetch = (async () => (calls++, new Response("model not found", { status: 404 }))) as typeof fetch;
   await assert.rejects(ollama("nope")([], []), /Ollama 404: model not found/);
+  assert.equal(calls, 1); // a 404 isn't retried
 });
 
 test("OpenAI-style client pairs tool results with their calls", async () => {
@@ -533,6 +546,30 @@ test("model check names the fix", async () => {
     throw new TypeError("fetch failed");
   }) as typeof fetch;
   await assert.rejects(modelAvailable("qwen3:8b"), /Ollama isn't running/);
+});
+
+test("through Tailscale, only the owner's login is accepted; warm-up primes the model", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "alfred-"));
+  const { chat, seen } = scripted(say("ready"), say(""), say(""));
+  const { handle, warmUp } = setup(folder, chat, fakeHands().hands, { tailscaleUser: "me@example.com" });
+  await warmUp();
+  assert.match(seen[0][0].content, /You are Alfred/);
+  const { createServer } = await import("node:http");
+  const server = createServer(handle);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const post = (headers: Record<string, string>) =>
+    fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/command`, {
+      method: "POST",
+      headers: { authorization: "Bearer k", ...headers },
+      body: '{"text":"hi"}',
+    });
+  try {
+    assert.equal((await post({ "tailscale-user-login": "stranger@example.com" })).status, 403);
+    assert.equal((await post({ "tailscale-user-login": "me@example.com" })).status, 200);
+    assert.equal((await post({})).status, 200); // from the Mac itself
+  } finally {
+    server.close();
+  }
 });
 
 test("server: auth, bad input, and a full command", async () => {

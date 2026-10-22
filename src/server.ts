@@ -5,13 +5,16 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { runAgent } from "./agent.ts";
+import { runAgent, systemPrompt } from "./agent.ts";
 import * as mac from "./mac.ts";
 import { bark, everywhere, macNotification, type Notify } from "./notify.ts";
 import { modelAvailable, ollama, openaiCompatible, type Chat } from "./ollama.ts";
+
+// Best tool-caller that fits next to macOS in 16 GB (Oct 2026): about 6.6 GB, ~20 tokens/s on an M4.
+export const DEFAULT_MODEL = "qwen3.5:9b";
 import { clean, type Command, type Step } from "./steps.ts";
 import { SESSION_FILE, telegram } from "./telegram.ts";
-import type { Hands } from "./tools.ts";
+import { toolsFor, type Hands } from "./tools.ts";
 import { waits } from "./waits.ts";
 
 export interface Config {
@@ -25,6 +28,9 @@ export interface Config {
   replyWithinMs: number;
   checkModel?: () => Promise<void>;
   telegramReady?: () => boolean;
+  // When set, requests that come through Tailscale must be from this login (Tailscale Serve adds
+  // the Tailscale-User-Login header and strips forged ones). Local requests have no header.
+  tailscaleUser?: string;
 }
 
 export function configFromEnv(env = process.env): Config {
@@ -37,7 +43,7 @@ export function configFromEnv(env = process.env): Config {
   };
   const log = logger(folder);
   // MODEL_URL points at an OpenAI-style local server (LM Studio etc.); without it, Ollama.
-  const model = env.MODEL || (env.MODEL_URL ? "qwen3-8b" : "qwen3:8b");
+  const model = env.MODEL || (env.MODEL_URL ? "qwen3.5-9b" : DEFAULT_MODEL);
   const channels: Notify[] = [];
   if (env.BARK_DEVICE_KEY && env.BARK_ENCRYPTION_KEY) {
     channels.push(
@@ -70,7 +76,10 @@ export function configFromEnv(env = process.env): Config {
       macMedia: mac.macMedia,
     },
     notify: everywhere(channels, log),
-    replyWithinMs: (Number(env.REPLY_WITHIN_SECONDS) || 25) * 1000,
+    // iOS Shortcuts gives up on a slow "Get Contents of URL" after an undocumented limit (reports
+    // range from 25 to 60 s), so answer well inside it.
+    replyWithinMs: (Number(env.REPLY_WITHIN_SECONDS) || 20) * 1000,
+    tailscaleUser: env.TAILSCALE_USER,
     telegramReady: () => tgConfigured && existsSync(SESSION_FILE),
   };
 }
@@ -89,6 +98,11 @@ async function people(folder: string): Promise<Record<string, string>> {
     return {};
   }
 }
+
+const warmUpMessages = (known: Record<string, string>) => [
+  { role: "system" as const, content: systemPrompt(known, "phone") },
+  { role: "user" as const, content: "Reply with the word ready." },
+];
 
 const late = (steps: Step[]) =>
   steps.length ? ` I couldn't do "${steps.map((s) => s.do).join(", ")}" on your phone because the Shortcut had already finished.` : "";
@@ -195,6 +209,10 @@ export function alfred(config: Config) {
     const route = `${req.method} ${req.url}`;
     if (!["POST /command", "GET /status", "POST /notify"].includes(route)) return send(404, { error: "not found" });
     if (req.headers.authorization !== `Bearer ${config.key}`) return send(401, { error: "unauthorized" });
+    const viaTailscale = req.headers["tailscale-user-login"];
+    if (config.tailscaleUser && viaTailscale !== undefined && viaTailscale !== config.tailscaleUser) {
+      return send(403, { error: "not your device" });
+    }
     if (route === "GET /status") return send(200, await status());
 
     let body: { text?: unknown; title?: unknown };
@@ -214,7 +232,20 @@ export function alfred(config: Config) {
     send(200, await command(body as Command));
   };
 
-  return { handle, waiting, command, status };
+  // Load the model and its reading of the instructions + tool list before the first real command,
+  // so that one isn't slow. Ollama reuses the processed prefix for later requests.
+  async function warmUp() {
+    for (let tries = 0; tries < 30; tries++) {
+      try {
+        await config.chat(warmUpMessages(await people(config.folder)), toolsFor("phone").map((t) => t.spec));
+        return log({ warmed_up: true });
+      } catch {
+        await new Promise((r) => setTimeout(r, 10_000)); // the model server may still be starting
+      }
+    }
+  }
+
+  return { handle, waiting, command, status, warmUp };
 }
 
 function message(err: unknown): string {
@@ -225,7 +256,8 @@ if (import.meta.main) {
   const config = configFromEnv();
   await mkdir(config.folder, { recursive: true });
   const port = Number(process.env.PORT || 8787);
-  const { handle, waiting } = alfred(config);
+  const { handle, waiting, warmUp } = alfred(config);
   createServer(handle).listen(port, "127.0.0.1", () => console.log(`Alfred listening on http://127.0.0.1:${port}`));
   setInterval(() => void waiting.check(), 5_000);
+  void warmUp();
 }
