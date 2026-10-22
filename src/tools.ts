@@ -18,6 +18,8 @@ export interface Message {
 export interface Hands {
   findContacts(name: string): Promise<Contact[]>;
   readMessages(handles: string[], count: number): Promise<Message[]>;
+  latestMessageId(): Promise<number>;
+  repliesAfter(handles: string[], afterId: number): Promise<(Message & { id: number })[]>;
   sendMessage(handle: string, text: string): Promise<void>;
   telegramRead(chat: string, count: number): Promise<{ chat: string; messages: Message[] }>;
   telegramSend(chat: string, text: string): Promise<{ chat: string }>;
@@ -25,11 +27,23 @@ export interface Hands {
   openApp(name: string): Promise<void>;
 }
 
+// "Do the rest when Sam answers": kept by src/waits.ts until a reply arrives.
+export interface Waiting {
+  contact: string;
+  handles: string[];
+  afterId: number; // only messages newer than this count as the reply
+  then: string; // what to do with the reply, in the model's words
+  command: string; // the owner's original command; decides who may be messaged
+  since: string;
+}
+
 export interface Turn {
-  command: string; // what the owner said, verbatim
+  command: string; // what the owner said, verbatim: sends are only allowed to people named in it
   people: Record<string, string>; // "partner" -> "Sam Haddad", from people.json
   steps: Step[]; // phone actions queued for the Shortcut
   hands: Hands;
+  wait(w: Waiting): void;
+  sent: Map<string, number>; // contact name -> latest message id when Alfred messaged them this turn
 }
 
 interface Tool {
@@ -65,6 +79,16 @@ export function namedInCommand(who: string, turn: Turn): boolean {
   return Object.entries(turn.people).some(
     ([alias, name]) => said.includes(alias.toLowerCase()) && (name.toLowerCase() === real || name.toLowerCase() === target),
   );
+}
+
+// Small models sometimes write a template ("${reply}", "[his response]") instead of reading the
+// real text first. Refuse it, so a placeholder never gets sent or saved.
+export function noPlaceholders(text: string): string {
+  if (/\$\{|\{\{|\[(his|her|their|the) [^\]]*(reply|response|message|answer)[^\]]*\]|<[^>]*(reply|response)[^>]*>/i.test(text)) {
+    throw new Error("That text has a placeholder in it. Read the real message with a tool first and use its exact words.");
+  }
+  if (!text.trim()) throw new Error("The text is empty.");
+  return text;
 }
 
 async function contactFor(who: string, turn: Turn): Promise<Contact> {
@@ -121,7 +145,18 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
     ["contact"],
     async (a, turn) => {
       const c = await contactFor(str(a.contact), turn);
-      const messages = await turn.hands.readMessages([...c.phones, ...c.emails], Math.min(20, num(a.count, 5)));
+      const handles = [...c.phones, ...c.emails];
+      // Right after messaging someone, their "response" can only be something newer than that, and
+      // a small model will otherwise grab an old message and treat it as the answer.
+      const sentAt = turn.sent.get(c.name);
+      if (sentAt !== undefined) {
+        const replies = await turn.hands.repliesAfter(handles, sentAt);
+        if (!replies.length) {
+          return { contact: c.name, messages: [], note: `No reply from ${c.name} yet to the message you just sent. Call wait_for_reply with the rest of the instructions.` };
+        }
+        return { contact: c.name, replies: replies.map((m) => ({ from: c.name, text: m.text, at: m.at })) };
+      }
+      const messages = await turn.hands.readMessages(handles, Math.min(20, num(a.count, 5)));
       return { contact: c.name, messages: messages.map((m) => ({ ...m, from: m.from === "me" ? "me" : c.name })) };
     },
   ),
@@ -134,8 +169,34 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
       const who = str(a.contact);
       if (!namedInCommand(who, turn)) throw new Error(`Not sent: the owner didn't name "${who}" in this command.`);
       const c = await contactFor(who, turn);
-      await turn.hands.sendMessage(c.phones[0] ?? c.emails[0], str(a.text));
+      const text = noPlaceholders(str(a.text));
+      const before = await turn.hands.latestMessageId();
+      await turn.hands.sendMessage(c.phones[0] ?? c.emails[0], text);
+      if (!turn.sent.has(c.name)) turn.sent.set(c.name, before);
       return { sent_to: c.name };
+    },
+  ),
+  tool(
+    "wait_for_reply",
+    "When the owner wants something done with a reply that hasn't arrived yet: after sending, call this with the rest of the instructions. Alfred watches for the contact's next iMessage and does them then (up to 24 hours).",
+    {
+      contact: { type: "string" },
+      then: { type: "string", description: 'What to do with the reply, e.g. "save the reply to a file in folder partner and send it to Lina on Telegram"' },
+    },
+    ["contact", "then"],
+    async (a, turn) => {
+      const c = await contactFor(str(a.contact), turn);
+      const then = str(a.then);
+      if (!then) throw new Error("Say what to do with the reply.");
+      turn.wait({
+        contact: c.name,
+        handles: [...c.phones, ...c.emails],
+        afterId: turn.sent.get(c.name) ?? (await turn.hands.latestMessageId()),
+        then,
+        command: turn.command,
+        since: new Date().toISOString(),
+      });
+      return { waiting_for: c.name, then };
     },
   ),
   tool(
@@ -153,7 +214,7 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
     async (a, turn) => {
       const chat = str(a.chat);
       if (!namedInCommand(chat, turn)) throw new Error(`Not sent: the owner didn't name "${chat}" in this command.`);
-      return { sent_to: (await turn.hands.telegramSend(realName(chat, turn), str(a.text))).chat };
+      return { sent_to: (await turn.hands.telegramSend(realName(chat, turn), noPlaceholders(str(a.text)))).chat };
     },
   ),
   tool(
@@ -161,7 +222,7 @@ open: url of an app or page (spotify:search:<query>, maps://?daddr=<place>, what
     "Save text to a file on the Mac, in the owner's Alfred folder.",
     { folder: { type: "string" }, name: { type: "string", description: "File name, e.g. notes.txt" }, content: { type: "string" } },
     ["name", "content"],
-    async (a, turn) => ({ saved: await turn.hands.saveFile(str(a.folder), str(a.name), String(a.content ?? "")) }),
+    async (a, turn) => ({ saved: await turn.hands.saveFile(str(a.folder), str(a.name), noPlaceholders(String(a.content ?? ""))) }),
   ),
   tool(
     "open_mac_app",

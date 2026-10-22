@@ -17,6 +17,8 @@ const pretend: Hands = {
     { from: "me", text: "can you grab the keys from my desk on your way?", at: "2026-10-22T09:00:00Z" },
     { from: "them", text: "Sure, I'll pick them up at 6 and be home by 7", at: "2026-10-22T09:05:00Z" },
   ],
+  latestMessageId: async () => 100,
+  repliesAfter: async () => [],
   sendMessage: async (handle, text) => show(`iMessage to ${handle}: ${text}`),
   telegramRead: async (chat) => ({ chat, messages: [{ from: chat, text: "Did Sam answer?", at: "2026-10-22T09:10:00Z" }] }),
   telegramSend: async (chat, text) => (show(`Telegram to ${chat}: ${text}`), { chat }),
@@ -29,7 +31,7 @@ const people = { partner: "Sam Haddad" };
 for (const text of process.argv.slice(2)) {
   console.log(`\n> ${text}`);
   const started = Date.now();
-  const reply = await runAgent({ text, now: new Date().toISOString() }, { chat, hands: pretend, people, log: (e: any) => e.error && show(`(${e.tool} refused: ${e.error})`) });
+  const reply = await runAgent({ text, now: new Date().toISOString() }, { chat, hands: pretend, people, log: (e: any) => e.error && show(`(${e.tool} refused: ${e.error})`), onWait: (w) => show(`wait for ${w.contact}'s reply, then: ${w.then}`) });
   for (const s of reply.steps) show(`phone: ${s.do}${s.value ? ` ${s.value}` : ""}${s.text ? ` "${s.text}"` : ""}${s.who ? ` ${s.who}` : ""}${s.url ? ` ${s.url}` : ""}`);
   console.log(`   says: ${JSON.stringify(reply.say)}  (${((Date.now() - started) / 1000).toFixed(1)} s)`);
 }

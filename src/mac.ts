@@ -69,9 +69,8 @@ export function textFromAttributedBody(blob: Uint8Array | null): string {
 
 const APPLE_EPOCH = 978307200; // 2001-01-01 in Unix seconds
 
-export async function readMessages(handles: string[], count: number, dbPath = join(homedir(), "Library/Messages/chat.db")): Promise<Message[]> {
-  const { DatabaseSync } = await import("node:sqlite");
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+export async function readMessages(handles: string[], count: number, dbPath = chatDb()): Promise<Message[]> {
+  const db = await openDb(dbPath);
   try {
     const rows = db.prepare("SELECT ROWID AS id, id AS handle FROM handle").all() as { id: number; handle: string }[];
     const ids = rows.filter((r) => handles.some((h) => sameHandle(h, r.handle))).map((r) => r.id);
@@ -88,6 +87,47 @@ export async function readMessages(handles: string[], count: number, dbPath = jo
       .all(...ids, count) as { is_from_me: number; secs: number; text: string | null; attributedBody: Uint8Array | null }[];
     return messages.reverse().map((m) => ({
       from: m.is_from_me ? "me" : "them",
+      text: m.text || textFromAttributedBody(m.attributedBody) || "(attachment)",
+      at: new Date((m.secs + APPLE_EPOCH) * 1000).toISOString(),
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+const chatDb = () => join(homedir(), "Library/Messages/chat.db");
+
+async function openDb(dbPath: string) {
+  const { DatabaseSync } = await import("node:sqlite");
+  return new DatabaseSync(dbPath, { readOnly: true });
+}
+
+export async function latestMessageId(dbPath = chatDb()): Promise<number> {
+  const db = await openDb(dbPath);
+  try {
+    return Number((db.prepare("SELECT MAX(ROWID) AS id FROM message").get() as { id: number | null }).id ?? 0);
+  } finally {
+    db.close();
+  }
+}
+
+// Messages from these handles (not from me) newer than afterId, oldest first.
+export async function repliesAfter(handles: string[], afterId: number, dbPath = chatDb()): Promise<(Message & { id: number })[]> {
+  const db = await openDb(dbPath);
+  try {
+    const rows = db.prepare("SELECT ROWID AS id, id AS handle FROM handle").all() as { id: number; handle: string }[];
+    const ids = rows.filter((r) => handles.some((h) => sameHandle(h, r.handle))).map((r) => r.id);
+    if (!ids.length) return [];
+    const found = db
+      .prepare(
+        `SELECT ROWID AS id, CASE WHEN date > 1000000000000 THEN date / 1000000000 ELSE date END AS secs, text, attributedBody
+         FROM message WHERE handle_id IN (${ids.map(() => "?").join(",")}) AND is_from_me = 0
+           AND associated_message_type = 0 AND ROWID > ? ORDER BY ROWID`,
+      )
+      .all(...ids, afterId) as { id: number; secs: number; text: string | null; attributedBody: Uint8Array | null }[];
+    return found.map((m) => ({
+      id: m.id,
+      from: "them",
       text: m.text || textFromAttributedBody(m.attributedBody) || "(attachment)",
       at: new Date((m.secs + APPLE_EPOCH) * 1000).toISOString(),
     }));

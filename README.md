@@ -25,10 +25,14 @@ iPhone                                    Mac mini at home
   - `phone`: skip/pause/play, volume, brightness, flashlight, Focus, timers, alarms, reminders, calls,
     opening apps. These run on the iPhone, because iOS lets nothing else touch them.
   - `messages_read`, `messages_send`: iMessage/SMS through the Mac's Messages app and its database.
+  - `wait_for_reply`: "…then save his answer and send it to Lina": Alfred watches for the reply and
+    finishes the job when it arrives (up to 24 h, survives restarts; the outcome goes to the log).
   - `telegram_read`, `telegram_send`: your own Telegram account, through Telegram's official API.
   - `save_file`: files in `~/Alfred`.
   - `open_mac_app`.
-- **Safety rails:** Alfred only sends to people you named in that command (directly or as "my
+- **Safety rails:** messages and files with placeholders (`${reply}`, `[his response]`) are refused,
+  so the model has to read the real text. Right after messaging someone, only newer messages count
+  as their reply. Alfred only sends to people you named in that command (directly or as "my
   partner" etc., from `~/Alfred/people.json`), so a message it reads can't redirect it. Files stay
   inside `~/Alfred`. Every command and tool call is logged to `~/Alfred/alfred.log`.
 
@@ -42,6 +46,7 @@ the iPhone.
 ```sh
 npm install
 npm test          # agent loop, tools, Messages database reading, server, with a scripted model
+npm run try -- "reply to my partner saying I'm on my way"   # real local model, pretend hands: nothing is sent
 npm run typecheck
 npm start         # needs macOS for the real hands
 ```
