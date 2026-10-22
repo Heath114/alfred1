@@ -1,7 +1,7 @@
 // macOS hands: Contacts and Messages through AppleScript, message history straight from the Messages
 // database, files in the Alfred folder. Needs the permissions in docs/MAC_SETUP.md.
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -251,7 +251,23 @@ function handleIds(db: Db, handles: string[]): number[] {
   return rows.filter((r) => handles.some((h) => sameHandle(h, r.handle))).map((r) => r.id);
 }
 
+// Why Messages can't be read: no Full Disk Access (macOS refuses even to look at the folder),
+// or Messages was never set up on this Mac.
+export function messagesProblem(dbPath = chatDb()): string | null {
+  try {
+    statSync(dbPath);
+    return null;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return "Messages isn't set up on this Mac: open Messages and sign in with your Apple Account.";
+    if (code === "EPERM" || code === "EACCES") return "no Full Disk Access";
+    return String(err);
+  }
+}
+
 export async function latestMessageId(dbPath = chatDb()): Promise<number> {
+  const problem = messagesProblem(dbPath);
+  if (problem) throw new Error(problem);
   const db = await openDb(dbPath);
   try {
     return Number((db.prepare("SELECT MAX(ROWID) AS id FROM message").get() as { id: number | null }).id ?? 0);

@@ -46,10 +46,12 @@ export function alfredAgent(opts: { node: string; appDir: string; uid: number })
   });
 }
 
+// bark-server reads its settings from the environment (names checked against the binary).
 export function barkAgent(opts: { server: string; dataDir: string }): string {
   return toPlist({
     Label: LABELS.bark,
-    ProgramArguments: [opts.server, "--addr", "127.0.0.1:8080", "--data", opts.dataDir],
+    ProgramArguments: [opts.server],
+    EnvironmentVariables: { BARK_SERVER_ADDRESS: "127.0.0.1:8080", BARK_SERVER_DATA_DIR: opts.dataDir },
     RunAtLoad: true,
     KeepAlive: true,
     ProcessType: "Background",

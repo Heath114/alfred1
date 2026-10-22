@@ -1,7 +1,7 @@
 // The owner's own Telegram account, through Telegram's official client API (MTProto via GramJS).
 // The login session lives only on this Mac (~/.alfred/telegram.session), created during setup.
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import tg from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { paths } from "./paths.ts";
@@ -19,6 +19,7 @@ export function telegram(apiId: number, apiHash: string) {
       throw new Error("Telegram isn't set up on the Mac yet (run setup again).");
     });
     const c = new tg.TelegramClient(new StringSession(session.trim()), apiId, apiHash, { connectionRetries: 3 });
+    c.setLogLevel("error" as never);
     await c.connect();
     return c;
   }
@@ -61,4 +62,20 @@ export function telegram(apiId: number, apiHash: string) {
       return { chat: title };
     },
   };
+}
+
+// One-time login to the owner's account (phone number, the code Telegram sends, and the two-step
+// password if there is one). Saves the session readable only by this user.
+export async function telegramLogin(apiId: number, apiHash: string, ask: (q: string) => Promise<string>): Promise<void> {
+  const client = new tg.TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 3 });
+  client.setLogLevel("error" as never); // its connection chatter would bury the questions
+  await client.start({
+    phoneNumber: () => ask("Your phone number on Telegram (with country code, e.g. +962...): "),
+    phoneCode: () => ask("The code Telegram just sent you: "),
+    password: () => ask("Your Telegram two-step verification password (Enter if none): "),
+    onError: (err) => console.error(`  ${err.message}`),
+  });
+  await mkdir(dirname(SESSION_FILE), { recursive: true, mode: 0o700 });
+  await writeFile(SESSION_FILE, String(client.session.save()), { mode: 0o600 });
+  await client.disconnect();
 }

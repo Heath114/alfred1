@@ -215,7 +215,9 @@ export function alfred(config: Config) {
     };
     if (req.method === "GET" && req.url === "/") return send(200, { ok: true, name: "alfred" });
     const route = `${req.method} ${req.url}`;
-    if (!["POST /command", "GET /status", "POST /notify", "POST /probe"].includes(route)) return send(404, { error: "not found" });
+    if (!["POST /command", "GET /status", "POST /notify", "POST /probe", "POST /contacts"].includes(route)) {
+      return send(404, { error: "not found" });
+    }
     if (req.headers.authorization !== `Bearer ${config.key}`) return send(401, { error: "unauthorized" });
     const viaTailscale = req.headers["tailscale-user-login"];
     if (config.tailscaleUser && viaTailscale !== undefined && viaTailscale !== config.tailscaleUser) {
@@ -231,6 +233,10 @@ export function alfred(config: Config) {
       if (typeof body?.text !== "string") throw new Error();
     } catch {
       return send(400, { error: 'send JSON like {"text": "skip this song"}' });
+    }
+    if (route === "POST /contacts") {
+      // Used by setup to check the names in people.json against Contacts.
+      return send(200, (await config.hands.findContacts(body.text as string)).map((c) => c.name));
     }
     if (route === "POST /probe") {
       // Used by setup to bring up macOS's permission prompts for the service itself.

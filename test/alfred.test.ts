@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { runAgent } from "../src/agent.ts";
-import { reminderArgs, findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, sendMessage, textFromAttributedBody } from "../src/mac.ts";
+import { messagesProblem, reminderArgs, findContacts, insideFolder, latestMessageId, readMessages, repliesAfter, sameHandle, saveFile, sendMessage, textFromAttributedBody } from "../src/mac.ts";
 import { modelAvailable, ollama, openaiCompatible, type ChatMessage, type Chat } from "../src/ollama.ts";
 import { bark, encryptForBark, everywhere } from "../src/notify.ts";
 import { createDecipheriv } from "node:crypto";
 import { alfredShortcut } from "../src/shortcut.ts";
 import { toPlist } from "../src/plist.ts";
+import { readEnv, setEnv } from "../src/envfile.ts";
 import { alfredAgent, appInfoPlist, barkAgent, watchdogAgent } from "../src/install.ts";
 import { ACTIONS } from "../src/steps.ts";
 import { alfred, type Config } from "../src/server.ts";
@@ -466,6 +467,14 @@ async function fakeMessagesDb() {
   return { path, write };
 }
 
+test("Messages not set up is told apart from missing permission", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nomsg-"));
+  assert.match(messagesProblem(join(dir, "chat.db"))!, /isn't set up on this Mac/);
+  await assert.rejects(latestMessageId(join(dir, "chat.db")), /isn't set up/);
+  await writeFile(join(dir, "chat.db"), "");
+  assert.equal(messagesProblem(join(dir, "chat.db")), null);
+});
+
 test("sending counts only once the message appears in Messages; SMS is the fallback", async () => {
   const fast = { confirmWithinMs: 300 };
   // Normal iMessage send.
@@ -833,8 +842,20 @@ test("Alfred.app and the LaunchAgents are valid plists with absolute paths", asy
   assert.equal(agent.KeepAlive, true);
   assert.equal(agent.LimitLoadToSessionType, "Aqua");
 
-  assert.deepEqual(parse(barkAgent({ server: "/x/bark-server", dataDir: "/x/data" })).ProgramArguments, ["/x/bark-server", "--addr", "127.0.0.1:8080", "--data", "/x/data"]);
+  const barkPlist = parse(barkAgent({ server: "/x/bark-server", dataDir: "/x/data" }));
+  assert.deepEqual(barkPlist.ProgramArguments, ["/x/bark-server"]);
+  assert.deepEqual(barkPlist.EnvironmentVariables, { BARK_SERVER_ADDRESS: "127.0.0.1:8080", BARK_SERVER_DATA_DIR: "/x/data" });
   const dog = parse(watchdogAgent(501));
   assert.deepEqual(dog.ProgramArguments, ["/bin/launchctl", "kickstart", "gui/501/com.alfred.agent"]);
   assert.equal(dog.StartInterval, 300);
+});
+
+test(".env updates keep comments and replace commented-out settings", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "env-"));
+  const file = join(dir, ".env");
+  await writeFile(file, "# Alfred\nALFRED_KEY=old\nMODEL=qwen3.5:9b\n# BARK_URL=http://127.0.0.1:8080\n");
+  setEnv(file, { ALFRED_KEY: "new", BARK_URL: "http://127.0.0.1:8080", TAILSCALE_HOST: "mac.tail1.ts.net" });
+  assert.equal(await readFile(file, "utf8"), "# Alfred\nALFRED_KEY=new\nMODEL=qwen3.5:9b\nBARK_URL=http://127.0.0.1:8080\nTAILSCALE_HOST=mac.tail1.ts.net\n");
+  assert.deepEqual(readEnv(file), { ALFRED_KEY: "new", MODEL: "qwen3.5:9b", BARK_URL: "http://127.0.0.1:8080", TAILSCALE_HOST: "mac.tail1.ts.net" });
+  assert.deepEqual(readEnv(join(dir, "missing")), {});
 });

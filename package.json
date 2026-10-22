@@ -7,7 +7,9 @@
     "telegram-login": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --experimental-strip-types scripts/telegram-login.ts",
     "test": "node --disable-warning=ExperimentalWarning --experimental-strip-types --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "try": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --experimental-strip-types scripts/try.ts"
+    "try": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --experimental-strip-types scripts/try.ts",
+    "setup": "./setup.sh",
+    "doctor": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --experimental-strip-types scripts/doctor.ts"
   },
   "license": "UNLICENSED",
   "devDependencies": {

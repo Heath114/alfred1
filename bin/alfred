@@ -2,5 +2,11 @@
 # Talk to Alfred from the Mac's Terminal:
 #   alfred "save my partner's last message to a file"
 #   alfred            (no words: a chat prompt, until you type "bye" or press Ctrl-D)
+#   alfred doctor     (what's working and how to fix what isn't)
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-exec node --disable-warning=ExperimentalWarning --experimental-strip-types "$DIR/scripts/cli.ts" "$@"
+NODE="$HOME/.alfred/runtime/node/bin/node"
+[[ -x "$NODE" ]] || NODE="node"
+if [[ "${1:-}" == "doctor" ]]; then
+  exec "$NODE" --disable-warning=ExperimentalWarning --experimental-strip-types "$DIR/scripts/doctor.ts"
+fi
+exec "$NODE" --disable-warning=ExperimentalWarning --experimental-strip-types "$DIR/scripts/cli.ts" "$@"
